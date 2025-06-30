@@ -14,6 +14,7 @@ import os
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "secure-air-415716-a1066b9d0ca6.json"
 PROPERTY_ID = "properties/392120488"
 
+properties = { 'itam.mx': 392120488, 'blog.itam.mx': 392065347}
 
 def create_host_filter():
     # Create URL path filter
@@ -55,76 +56,70 @@ def create_host_filter():
         }
     )
 
-def fetch_metrics():
+def fetch_metrics(s_d , e_d, prop,metrics_list=[],  dimensions_list=[]):
+    '''
+    Fetches specified metrics and dimensions from Google Analytics 4.
+    
+    Args:
+        metrics_list (list): List of metric names to fetch.
+        dimensions_list (list): List of dimension names to fetch.
+        s_d (str): Start date in 'YYYY-MM-DD' format.
+        e_d (str): End date in 'YYYY-MM-DD' format.
+    '''
     client = BetaAnalyticsDataClient()
     
     metrics = [
-        Metric(name="activeUsers"),
-        Metric(name="screenPageViews")
+        Metric(name=metric) for metric in metrics_list
     ]
     
     dimensions = [
-        Dimension(name="sessionSource")
+        Dimension(name=dimension) for dimension in dimensions_list
     ]
     date_ranges = [
-        DateRange(start_date="2024-04-01", end_date="2024-04-30")
+        DateRange(start_date=s_d, end_date=e_d)
     ]
     
     request = RunReportRequest(
-        property=PROPERTY_ID,
+        property=prop,
         metrics=metrics,
         date_ranges=date_ranges,
-        dimensions=dimensions,
-        #dimension_filter=create_host_filter(),
-        metric_aggregations=["TOTAL"],
+        dimensions=dimensions
     )
     
     try:
         response = client.run_report(request)
-
         #print(response)
-        
         # Check if we got data
+        result ={}
         if not response.row_count:
             print("No data found for the specified filters and date ranges")
             return
-        sum=0
-        for i in range (len(response.rows)):
-            source_name = response.rows[i].dimension_values[0].value
-            users = response.rows[i].metric_values[1].value
-            sum+= int(users)
-            print(source_name)
-            print(users)
-            
-        print(f"Total users from non-Google sources: {sum}")
+        for row in response.rows:
+            for metric_value in row.metric_values:
+                metric_name = metrics[row.metric_values.index(metric_value)].name
+                if metric_name not in result:
+                    result[metric_name] = []
+                result[metric_name].append(metric_value.value)
+        print(result)
+        return response
     except Exception as e:
         print(f"Error: {str(e)}")
 
-def list_all_hostnames():
-    client = BetaAnalyticsDataClient()
-    
-    request = RunReportRequest(
-        property=PROPERTY_ID,
-        dimensions=[Dimension(name="sessionSource")],
-        date_ranges=[DateRange(start_date="2025-04-01", end_date="2025-04-30")],
-        #dimension_filter=create_host_filter(),  # Filter to only show .itam.mx hosts
-        limit=50
-    )
-    
-    try:
-        response = client.run_report(request)
-        
-        print("\nHostnames ending with .itam.mx:")
-        print("-----------------------------")
-        if response.row_count == 0:
-            print("No matching hosts found")
-        else:
-            for row in response.rows:
-                for dimension in row.dimension_values:
-                    print(dimension.value)
-    except Exception as e:
-        print(f"Error listing hostnames: {str(e)}")
-
 if __name__ == "__main__":
-    fetch_metrics()
-    #list_all_hostnames()
+    metrics_list = [
+        'totalUsers',
+        'screenPageViews'
+    ]
+
+    dimensions_list = [
+        'hostName',
+        'week',
+
+    ]
+
+    start_date = "2024-04-01"
+    end_date = "2024-04-30"
+    for prop in properties:
+        print(f"Fetching metrics for property: {prop} ({properties[prop]})")
+        prop_cadena = f'properties/{properties[prop]}'
+        fetch_metrics(start_date, end_date,prop_cadena, metrics_list)
