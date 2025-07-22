@@ -9,6 +9,8 @@ from google.analytics.data_v1beta.types import (
     FilterExpressionList
 )
 import os
+import pandas as pd
+from datetime import datetime, timedelta
 
 # Configuration
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "secure-air-415716-a1066b9d0ca6.json"
@@ -31,7 +33,7 @@ month_table = {
 }
 
 # Parameters
-YEAR = 2026
+YEAR = 2024
 
 def calculate_dates(year):
     '''
@@ -40,7 +42,6 @@ def calculate_dates(year):
     Returns:
         tuple: (start_date, end_date) in 'YYYY-MM-DD' format.
     '''
-    from datetime import datetime, timedelta
     today = datetime.now()
     start_date = f"{year}-01-01"
     if year == today.year:
@@ -51,7 +52,7 @@ def calculate_dates(year):
         end_date = f"{year}-12-31"
     return start_date, end_date
 
-def fetch_metrics(s_d , e_d, prop,metrics_list=[],  dimensions_list=[]):
+def fetch_metrics(s_d , e_d, prop, metrics_list=[], dimensions_list=[]):
     '''
     Fetches specified metrics and dimensions from Google Analytics 4.
     
@@ -83,12 +84,10 @@ def fetch_metrics(s_d , e_d, prop,metrics_list=[],  dimensions_list=[]):
     
     try:
         response = client.run_report(request)
-        #print(response)
-        # Check if we got data
-        result ={}
+        result = {}
         if not response.row_count:
             print("No data found for the specified filters and date ranges")
-            return
+            return None
         for row in response.rows:
             for metric_value in row.metric_values:
                 for dimension_value in row.dimension_values:
@@ -100,6 +99,64 @@ def fetch_metrics(s_d , e_d, prop,metrics_list=[],  dimensions_list=[]):
         return result
     except Exception as e:
         print(f"Error: {str(e)}")
+        return None
+
+def create_excel_report(data, year, filename="analytics_report.xlsx"):
+    """
+    Creates an Excel report from the analytics data.
+    
+    Args:
+        data (dict): Dictionary containing analytics data for each property
+        year (int): The year of the report
+        filename (str): Output Excel filename
+    """
+    writer = pd.ExcelWriter(filename, engine='xlsxwriter')
+    
+    for property_name, monthly_data in data.items():
+        # Prepare DataFrame
+        rows = []
+        for month_num, metrics in monthly_data.items():
+            rows.append({
+                'Year': year,
+                'Month': month_table[month_num],
+                'Month Number': int(month_num),
+                'Total Users': metrics.get('totalUsers', 0),
+                'Total Views': metrics.get('screenPageViews', 0)
+            })
+        
+        # Create DataFrame and sort by month number
+        df = pd.DataFrame(rows)
+        df = df.sort_values('Month Number')
+        df = df.drop('Month Number', axis=1)  # Remove the temporary sorting column
+        
+        # Write to Excel
+        df.to_excel(writer, sheet_name=property_name[:31], index=False)  # Sheet name max 31 chars
+        
+        # Get workbook and worksheet objects for formatting
+        workbook = writer.book
+        worksheet = writer.sheets[property_name[:31]]
+        
+        # Add some formatting
+        header_format = workbook.add_format({
+            'bold': True,
+            'text_wrap': True,
+            'valign': 'top',
+            'fg_color': '#D7E4BC',
+            'border': 1
+        })
+        
+        # Write the column headers with the defined format
+        for col_num, value in enumerate(df.columns.values):
+            worksheet.write(0, col_num, value, header_format)
+        
+        # Set column widths
+        worksheet.set_column('A:A', 10)  # Year
+        worksheet.set_column('B:B', 15)  # Month
+        worksheet.set_column('C:D', 15)  # Metrics
+    
+    # Save the Excel file
+    writer.close()
+    print(f"Excel report generated: {filename}")
 
 if __name__ == "__main__":
     metrics_list = [
@@ -109,28 +166,34 @@ if __name__ == "__main__":
 
     dimensions_list = [
         'month'
-
     ]
 
-    # gets the start and end dates for the year and handles the case where the year is greater than the current year
     try:
         start_date, end_date = calculate_dates(YEAR)
     except ValueError as e:
         print(f"Error: {str(e)}")
         exit(1)
+    
+    all_data = {}
+    
     for prop in properties:
         print(f"Fetching metrics for property: {prop} ({properties[prop]})")
         prop_cadena = f'properties/{properties[prop]}'
-        result = fetch_metrics(start_date, end_date,prop_cadena,metrics_list, dimensions_list )
-        #sort the result by month
-        if result:
-            result = dict(sorted(result.items()))
+        result = fetch_metrics(start_date, end_date, prop_cadena, metrics_list, dimensions_list)
         
-        #this part is exclusively for monthly data
-
         if result:
+            # Sort the result by month
+            result = dict(sorted(result.items()))
+            all_data[prop] = result
+            
             print(f"Results for {prop} {YEAR}:")
             for dimension, metrics in result.items():
                 print(f"{month_table[dimension]}: {metrics}")
         else:
             print(f"No data found for property: {prop}")
+    
+    # Create Excel report if we have data
+    if all_data:
+        create_excel_report(all_data, YEAR, filename=f"analytics_report_{YEAR}.xlsx")
+    else:
+        print("No data available to generate Excel report")
