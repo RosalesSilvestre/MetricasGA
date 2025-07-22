@@ -17,21 +17,6 @@ os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "secure-air-415716-a1066b9d0ca6.j
 
 properties = { 'itam.mx': 392120488, 'blog.itam.mx': 392065347}
 
-month_table = {
-    '01': 'Enero',
-    '02': 'Febrero',
-    '03': 'Marzo',
-    '04': 'Abril',
-    '05': 'Mayo',
-    '06': 'Junio',
-    '07': 'Julio',
-    '08': 'Agosto',
-    '09': 'Septiembre',
-    '10': 'Octubre',
-    '11': 'Noviembre',
-    '12': 'Diciembre'
-}
-
 # Parameters
 YEAR = 2024
 
@@ -95,7 +80,11 @@ def fetch_metrics(s_d , e_d, prop, metrics_list=[], dimensions_list=[]):
                     dimension_value = dimension_value.value
                     if dimension_value not in result:
                         result[dimension_value] = {}
-                    result[dimension_value][metric_name] = int(metric_value.value)
+                    #handles when the metric value is a float and needs to be rounded and the casting from string to number
+                    data=round(float(metric_value.value), 2)
+                    if(data.is_integer()):
+                        data = int(data)
+                    result[dimension_value][metric_name] = data
         return result
     except Exception as e:
         print(f"Error: {str(e)}")
@@ -103,7 +92,7 @@ def fetch_metrics(s_d , e_d, prop, metrics_list=[], dimensions_list=[]):
 
 def create_excel_report(data, year, filename="analytics_report.xlsx"):
     """
-    Creates an Excel report from the analytics data.
+    Creates an Excel report from the analytics data with proper date format for Power BI.
     
     Args:
         data (dict): Dictionary containing analytics data for each property
@@ -116,18 +105,22 @@ def create_excel_report(data, year, filename="analytics_report.xlsx"):
         # Prepare DataFrame
         rows = []
         for month_num, metrics in monthly_data.items():
+            # Calculate the last day of the month
+            if int(month_num) == 12:
+                last_day = datetime(year, 12, 31)
+            else:
+                last_day = datetime(year, int(month_num)+1, 1) - timedelta(days=1)
+            
             rows.append({
-                'Year': year,
-                'Month': month_table[month_num],
-                'Month Number': int(month_num),
+                'Date': last_day.strftime('%Y-%m-%d'),  # Format as YYYY-MM-DD for Power BI
                 'Total Users': metrics.get('totalUsers', 0),
                 'Total Views': metrics.get('screenPageViews', 0)
             })
         
-        # Create DataFrame and sort by month number
+        # Create DataFrame and sort by date
         df = pd.DataFrame(rows)
-        df = df.sort_values('Month Number')
-        df = df.drop('Month Number', axis=1)  # Remove the temporary sorting column
+        #df['Date'] = pd.to_datetime(df['Date'])  # Convert to datetime for proper sorting
+        df = df.sort_values('Date')
         
         # Write to Excel
         df.to_excel(writer, sheet_name=property_name[:31], index=False)  # Sheet name max 31 chars
@@ -145,14 +138,16 @@ def create_excel_report(data, year, filename="analytics_report.xlsx"):
             'border': 1
         })
         
+        # Date format for Power BI compatibility
+        date_format = workbook.add_format({'num_format': 'yyyy-mm-dd'})
+        
         # Write the column headers with the defined format
         for col_num, value in enumerate(df.columns.values):
             worksheet.write(0, col_num, value, header_format)
         
-        # Set column widths
-        worksheet.set_column('A:A', 10)  # Year
-        worksheet.set_column('B:B', 15)  # Month
-        worksheet.set_column('C:D', 15)  # Metrics
+        # Apply date format to date column
+        worksheet.set_column('A:A', 15, date_format)  # Date column
+        worksheet.set_column('B:C', 15)  # Metric columns
     
     # Save the Excel file
     writer.close()
@@ -161,7 +156,8 @@ def create_excel_report(data, year, filename="analytics_report.xlsx"):
 if __name__ == "__main__":
     metrics_list = [
         'totalUsers',
-        'screenPageViews'
+        'screenPageViews',
+        'screenPageViewsPerSession'
     ]
 
     dimensions_list = [
@@ -187,8 +183,8 @@ if __name__ == "__main__":
             all_data[prop] = result
             
             print(f"Results for {prop} {YEAR}:")
-            for dimension, metrics in result.items():
-                print(f"{month_table[dimension]}: {metrics}")
+            for month_num, metrics in result.items():
+                print(f"Month {month_num}: {metrics}")
         else:
             print(f"No data found for property: {prop}")
     
