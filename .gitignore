@@ -3,3 +3,6 @@ ga4_fields_report.txt
 .vscode/launch.json
 ~$*
 analytics_report_2024.xlsx
+token.json
+client_secret.json
+__pycache__/youtube_main.cpython-313.pyc

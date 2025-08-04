@@ -104,19 +104,13 @@ def create_excel_report(data, year, filename="analytics_report.xlsx"):
     for property_name, monthly_data in data.items():
         # Prepare DataFrame
         rows = []
-        for month_num, metrics in monthly_data.items():
-            # Calculate the last day of the month
-            if int(month_num) == 12:
-                last_day = datetime(year, 12, 31)
-            else:
-                last_day = datetime(year, int(month_num)+1, 1) - timedelta(days=1)
-            
+        for date, metrics in monthly_data.items():
             rows.append({
-                'Date': last_day.strftime('%Y-%m-%d'),  # Format as YYYY-MM-DD for Power BI
+                'Date': date,
                 'Total Users': metrics.get('totalUsers', 0),
-                'Total Views': metrics.get('screenPageViews', 0)
+                'Total Views': metrics.get('screenPageViews', 0),
+                'Views per Session': metrics.get('screenPageViewsPerSession', 0)
             })
-        
         # Create DataFrame and sort by date
         df = pd.DataFrame(rows)
         #df['Date'] = pd.to_datetime(df['Date'])  # Convert to datetime for proper sorting
@@ -161,7 +155,7 @@ if __name__ == "__main__":
     ]
 
     dimensions_list = [
-        'month'
+        'date'
     ]
 
     try:
