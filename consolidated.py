@@ -31,7 +31,7 @@ def fetch_google_analytics_data(StartDate, EndDate):
     client = BetaAnalyticsDataClient()
     
     #Defines the metrics and dimensions to fetch
-    metrics_list = ["activeUsers", "totalUsers"]
+    metrics_list = ["totalUsers","screenPageViews",  "screenPageViewsPerSession"]
     dimensions_list = []
 
     # Transforms the list of metrics,dimensions and the date_ranges into the required format
@@ -74,8 +74,9 @@ def fetch_google_analytics_data(StartDate, EndDate):
             results['itam.mx'] = {}
         else:
             results['itam.mx'] = {
-                "activeUsers": [row.metric_values[0].value for row in response_itam.rows],
-                "totalUsers": [row.metric_values[1].value for row in response_itam.rows],
+                "totalUsers": [int(row.metric_values[0].value) for row in response_itam.rows],
+                "views": [int(row.metric_values[1].value) for row in response_itam.rows],
+                "viewsPerSession": [round(float(row.metric_values[2].value),2) for row in response_itam.rows],
             }
     except Exception as e:
         print(f"Error fetching data for itam.mx: {e}")
@@ -90,8 +91,9 @@ def fetch_google_analytics_data(StartDate, EndDate):
             results['blog.itam.mx'] = {}
         else:
             results['blog.itam.mx'] = {
-                "activeUsers": [row.metric_values[0].value for row in response_blog.rows],
-                "totalUsers": [row.metric_values[1].value for row in response_blog.rows],
+                "totalUsers": [int(row.metric_values[0].value) for row in response_blog.rows],
+                "views": [int(row.metric_values[1].value) for row in response_blog.rows],
+                "viewsPerSession": [round(float(row.metric_values[2].value),2) for row in response_blog.rows],
             }
 
     except Exception as e:
@@ -126,8 +128,9 @@ def main(StartDate, EndDate):
     print("Google Analytics Data:")
     for property_name, data in google_analytics_data.items():
         print(f"{property_name}:")
-        print(f"  Active Users: {data.get('activeUsers', 'No data')}")
-        print(f"  Total Users: {data.get('totalUsers', 'No data')}")
+        print(f"  Total Users: {data.get('totalUsers', 'No data')[0]}")
+        print(f"  Views: {data.get('views', 'No data')[0]}")
+        print(f"  Views per Session: {data.get('viewsPerSession', 'No data')[0]}")
 
 if __name__ == "__main__":
     main('2025-01-01', '2025-01-31')
