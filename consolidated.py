@@ -102,20 +102,71 @@ def fetch_google_analytics_data(StartDate, EndDate):
 
     return results
 
-def fetch_youtube_analytics_data(channel_id, start_date, end_date):
-    """Fetches data from YouTube Analytics for the specified channel and date range."""
-    youtube_analytics_service = get_authenticated_service()
-    # Define the request
-    request = youtube_analytics_service.reports().query(
-        ids=f"channel=={channel_id}",
-        startDate=start_date,
-        endDate=end_date,
-        metrics="views,likes,subscribersGained",
-        dimensions="day"
-    )
-    # Make the request
-    response = request.execute()
-    return response
+def fetch_youtube_analytics_data( start_date, end_date):
+    # --- Configuration ---
+    # The file client_secret.json contains your OAuth 2.0 client credentials.
+    CLIENT_SECRETS_FILE = "client_secret.json"
+
+    # The scope for the YouTube Analytics API.
+    # This scope allows access to YouTube Analytics data.
+    SCOPES = ["https://www.googleapis.com/auth/youtube.readonly",
+            "https://www.googleapis.com/auth/yt-analytics.readonly"]
+
+    # Path to store the user's access and refresh tokens.
+    TOKEN_FILE = "token.json"
+
+    """Authenticates with Google and returns a YouTube Analytics service object."""
+    credentials = None
+    # The file token.json stores the user's access and refresh tokens, and is
+    # created automatically when the authorization flow completes for the first
+    # time.
+    if os.path.exists(TOKEN_FILE):
+        credentials = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+
+    # If there are no (valid) credentials available, let the user log in.
+    if not credentials or not credentials.valid:
+        if credentials and credentials.expired and credentials.refresh_token:
+            credentials.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                CLIENT_SECRETS_FILE, SCOPES
+            )
+            # You might need to change the redirect_uri depending on your application type.
+            # For desktop apps, 'urn:ietf:wg:oauth:2.0:oob' is common.
+            # For web apps, it would be a URL.
+            credentials = flow.run_local_server(port=0) # Automatically opens browser for authentication
+        # Save the credentials for the next run
+        with open(TOKEN_FILE, "w") as token:
+            token.write(credentials.to_json())
+
+    youtube_analytics_service =build("youtubeAnalytics", "v2", credentials=credentials)
+
+    # --- Main Script ---
+    try:
+        response = youtube_analytics_service.reports().query(
+            ids=f"channel==MINE",
+            startDate=start_date,
+            endDate=end_date,
+            metrics="views",
+            dimensions="insightTrafficSourceType",
+            #sort="month"
+        ).execute()
+
+        results = []
+        if "rows" in response:
+            for row in response["rows"]:
+                source = row[0]
+                views = row[1]
+                results.append({
+                    "source": source,
+                    "views": views
+                })
+        return results
+
+    except HttpError as e:
+        print(f"An HTTP error {e.resp.status} occurred: {e.content}")
+        return []
+
 
 def main(StartDate, EndDate):
     """Main function to execute the script.
@@ -131,6 +182,22 @@ def main(StartDate, EndDate):
         print(f"  Total Users: {data.get('totalUsers', 'No data')[0]}")
         print(f"  Views: {data.get('views', 'No data')[0]}")
         print(f"  Views per Session: {data.get('viewsPerSession', 'No data')[0]}")
+
+    # Fetch YouTube Analytics data
+    youtube_analytics_data = fetch_youtube_analytics_data(StartDate, EndDate)
+
+    print("\nYouTube Analytics Data:")
+    for entry in youtube_analytics_data:
+        print(f"  Source: {entry['source']}, Views: {entry['views']}")
+
+    # Calculates advertisement views and total views from YouTube data
+    ad_views = sum(int(entry['views']) for entry in youtube_analytics_data if entry['source'] == 'ADVERTISING')
+    total_views = sum(int(entry['views']) for entry in youtube_analytics_data)
+    organic_views = total_views - ad_views
+
+    print(f"\nYouTube Advertisement Views: {ad_views}")
+    print(f"YouTube Organic Views: {organic_views}")
+    print(f"YouTube Total Views: {total_views}")
 
 if __name__ == "__main__":
     main('2025-01-01', '2025-01-31')
