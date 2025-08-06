@@ -19,7 +19,6 @@ import os
 import pandas as pd
 from datetime import datetime, timedelta
 
-from youtube_main import get_authenticated_service
 
 def fetch_google_analytics_data(StartDate, EndDate):
     """Fetches data from Google Analytics for the specified properties and date range."""
