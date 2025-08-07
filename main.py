@@ -1,8 +1,9 @@
 import os
-import datetime
+import dotenv
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
@@ -10,24 +11,31 @@ from google.analytics.data_v1beta.types import (
     DateRange,
     Dimension,
     Metric,
-    RunReportRequest,
-    Filter,
-    FilterExpression,
-    FilterExpressionList
+    RunReportRequest
 )
-import os
-import pandas as pd
-from datetime import datetime, timedelta
 
+dotenv.load_dotenv()
 
 def fetch_google_analytics_data(StartDate, EndDate):
     """Fetches data from Google Analytics for the specified properties and date range."""
+
     # Configuration
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "secure-air-415716-a1066b9d0ca6.json"
+    # Properties to fetch data from
     properties = { 'itam.mx': 392120488, 'blog.itam.mx': 392065347}
 
+    # Credentials for Google Analytics Data API
+    GA4_CREDENTIALS_PATH = os.getenv("GA4_CREDENTIALS_PATH")
+
+    if not GA4_CREDENTIALS_PATH:
+        raise ValueError("GA4_CREDENTIALS_PATH environment variable is not set.")
+
+    ga4_credentials= service_account.Credentials.from_service_account_file(
+        GA4_CREDENTIALS_PATH,
+        scopes=["https://www.googleapis.com/auth/analytics.readonly"]
+    )
+
     # Creates a client for the Google Analytics Data API
-    client = BetaAnalyticsDataClient()
+    client = BetaAnalyticsDataClient(credentials=ga4_credentials)
     
     #Defines the metrics and dimensions to fetch
     metrics_list = ["totalUsers","screenPageViews",  "screenPageViewsPerSession"]
