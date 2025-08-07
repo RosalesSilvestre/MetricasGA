@@ -112,7 +112,10 @@ def fetch_google_analytics_data(StartDate, EndDate):
 def fetch_youtube_analytics_data( start_date, end_date):
     # --- Configuration ---
     # The file client_secret.json contains your OAuth 2.0 client credentials.
-    CLIENT_SECRETS_FILE = "client_secret.json"
+    CLIENT_SECRETS_FILE = os.getenv("CLIENT_SECRETS_FILE")
+
+    if not CLIENT_SECRETS_FILE:
+        raise ValueError("CLIENT_SECRETS_FILE environment variable is not set.")
 
     # The scope for the YouTube Analytics API.
     # This scope allows access to YouTube Analytics data.
@@ -120,7 +123,10 @@ def fetch_youtube_analytics_data( start_date, end_date):
             "https://www.googleapis.com/auth/yt-analytics.readonly"]
 
     # Path to store the user's access and refresh tokens.
-    TOKEN_FILE = "token.json"
+    TOKEN_FILE = os.getenv("TOKEN_FILE")
+
+    if not TOKEN_FILE:
+        raise ValueError("TOKEN_FILE environment variable is not set.")
 
     """Authenticates with Google and returns a YouTube Analytics service object."""
     credentials = None
@@ -128,7 +134,9 @@ def fetch_youtube_analytics_data( start_date, end_date):
     # created automatically when the authorization flow completes for the first
     # time.
     if os.path.exists(TOKEN_FILE):
-        credentials = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        credentials = Credentials.from_authorized_user_file(
+            TOKEN_FILE, SCOPES
+        )
 
     # If there are no (valid) credentials available, let the user log in.
     if not credentials or not credentials.valid:
