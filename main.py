@@ -1,7 +1,5 @@
 import os
 import dotenv
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -21,7 +19,15 @@ def fetch_google_analytics_data(StartDate, EndDate):
 
     # Configuration
     # Properties to fetch data from
-    properties = { 'itam.mx': 392120488, 'blog.itam.mx': 392065347}
+    properties = {}
+
+    properties['itam.mx'] = os.getenv("ITAM_GA4_PROPERTY_ID")
+    if not properties['itam.mx']:
+        raise ValueError("ITAM_GA4_PROPERTY_ID environment variable is not set.")
+    
+    properties['blog.itam.mx'] = os.getenv("ITAM_BLOG_GA4_PROPERTY_ID")
+    if not properties['blog.itam.mx']:
+        raise ValueError("ITAM_BLOG_GA4_PROPERTY_ID environment variable is not set.")
 
     # Credentials for Google Analytics Data API
     GA4_CREDENTIALS_PATH = os.getenv("GA4_CREDENTIALS_PATH")
@@ -137,22 +143,6 @@ def fetch_youtube_analytics_data( start_date, end_date):
         credentials = Credentials.from_authorized_user_file(
             TOKEN_FILE, SCOPES
         )
-
-    # If there are no (valid) credentials available, let the user log in.
-    if not credentials or not credentials.valid:
-        if credentials and credentials.expired and credentials.refresh_token:
-            credentials.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                CLIENT_SECRETS_FILE, SCOPES
-            )
-            # You might need to change the redirect_uri depending on your application type.
-            # For desktop apps, 'urn:ietf:wg:oauth:2.0:oob' is common.
-            # For web apps, it would be a URL.
-            credentials = flow.run_local_server(port=0) # Automatically opens browser for authentication
-        # Save the credentials for the next run
-        with open(TOKEN_FILE, "w") as token:
-            token.write(credentials.to_json())
 
     youtube_analytics_service =build("youtubeAnalytics", "v2", credentials=credentials)
 
