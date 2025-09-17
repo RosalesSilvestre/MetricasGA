@@ -29,6 +29,10 @@ def fetch_google_analytics_data(StartDate, EndDate):
     if not properties['blog.itam.mx']:
         raise ValueError("ITAM_BLOG_GA4_PROPERTY_ID environment variable is not set.")
 
+    properties['carreras.itam.mx'] = os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID")
+    if not properties['carreras.itam.mx']:
+        raise ValueError("ITAM_CARRERAS_GA4_PROPERTY_ID environment variable is not set.")
+
     # Credentials for Google Analytics Data API
     GA4_CREDENTIALS_PATH = os.getenv("GA4_CREDENTIALS_PATH")
 
@@ -73,6 +77,13 @@ def fetch_google_analytics_data(StartDate, EndDate):
         date_ranges=date_ranges,
         dimensions=dimensions
     )
+
+    request_carreras = RunReportRequest(
+        property=f"properties/{properties['carreras.itam.mx']}",
+        metrics=metrics,
+        date_ranges=date_ranges,
+        dimensions=dimensions
+    )
     # Declares the dictonary to store the results
     results = {}
 
@@ -112,6 +123,24 @@ def fetch_google_analytics_data(StartDate, EndDate):
     except Exception as e:
         print(f"Error fetching data for blog.itam.mx: {e}")
         response_blog = None
+
+    try:
+        # Fetches the data for carreras.itam.mx
+        response_carreras = client.run_report(request_carreras)
+
+        #Parse the response into a dictionary
+        if not response_carreras.rows:
+            print("No data found for carreras.itam.mx")
+            results['carreras.itam.mx'] = {}
+        else:
+            results['carreras.itam.mx'] = {
+                "totalUsers": [int(row.metric_values[0].value) for row in response_carreras.rows],
+                "views": [int(row.metric_values[1].value) for row in response_carreras.rows],
+                "viewsPerSession": [round(float(row.metric_values[2].value),2) for row in response_carreras.rows],
+            }
+    except Exception as e:
+        print(f"Error fetching data for carreras.itam.mx: {e}")
+        response_carreras = None
 
     return results
 
@@ -172,7 +201,84 @@ def fetch_youtube_analytics_data( start_date, end_date):
         print(f"An HTTP error {e.resp.status} occurred: {e.content}")
         return []
 
+def update_google_sheet(google_analytics_data, youtube_analytics_data):
+    """
+    Updates a Google Sheet with the provided analytics data.
+    """
+    try:
+        # --- Configuration for Google Sheets ---
+        GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+        if not GOOGLE_SHEET_ID:
+            raise ValueError("GOOGLE_SHEET_ID environment variable is not set.")
 
+        GOOGLE_SHEETS_CREDENTIALS_PATH = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH")
+        if not GOOGLE_SHEETS_CREDENTIALS_PATH:
+            raise ValueError("GOOGLE_SHEETS_CREDENTIALS_PATH environment variable is not set.")
+
+        SHEET_NAME = "Analytics" # Or the name of the sheet you want to update
+        
+        # --- Authentication ---
+        creds = service_account.Credentials.from_service_account_file(
+            GOOGLE_SHEETS_CREDENTIALS_PATH,
+            scopes=['https://www.googleapis.com/auth/spreadsheets']
+        )
+        service = build('sheets', 'v4', credentials=creds)
+        sheet = service.spreadsheets()
+
+        # --- Prepare the data for the sheet ---
+        # Get the first value from the lists, or use 0 if the list is empty
+        itam_total_users = google_analytics_data.get('itam.mx', {}).get('totalUsers', [0])[0]
+        itam_views = google_analytics_data.get('itam.mx', {}).get('views', [0])[0]
+        itam_views_per_session = google_analytics_data.get('itam.mx', {}).get('viewsPerSession', [0])[0]
+
+        blog_total_users = google_analytics_data.get('blog.itam.mx', {}).get('totalUsers', [0])[0]
+        blog_views = google_analytics_data.get('blog.itam.mx', {}).get('views', [0])[0]
+        blog_views_per_session = google_analytics_data.get('blog.itam.mx', {}).get('viewsPerSession', [0])[0]
+
+        carreras_total_users = google_analytics_data.get('carreras.itam.mx', {}).get('totalUsers', [0])[0]
+        carreras_views = google_analytics_data.get('carreras.itam.mx', {}).get('views', [0])[0]
+        carreras_views_per_session = google_analytics_data.get('carreras.itam.mx', {}).get('viewsPerSession', [0])[0]
+
+        # Calculate YouTube views
+        ad_views = sum(int(entry['views']) for entry in youtube_analytics_data if entry['source'] == 'ADVERTISING')
+        total_views = sum(int(entry['views']) for entry in youtube_analytics_data)
+        organic_views = total_views - ad_views
+
+        # Define the data to be written
+        values = [
+            ["Metric", "Value"],
+            ["ITAM Total Users", itam_total_users],
+            ["ITAM Views", itam_views],
+            ["ITAM Views Per Session", itam_views_per_session],
+            ["Blog Total Users", blog_total_users],
+            ["Blog Views", blog_views],
+            ["Blog Views Per Session", blog_views_per_session],
+            ["Carreras Total Users", carreras_total_users],
+            ["Carreras Views", carreras_views],
+            ["Carreras Views Per Session", carreras_views_per_session],
+            ["YouTube Advertisement Views", ad_views],
+            ["YouTube Organic Views", organic_views],
+            ["YouTube Total Views", total_views]
+        ]
+
+        # --- Write data to the sheet ---
+        body = {
+            'values': values
+        }
+        result = sheet.values().update(
+            spreadsheetId=GOOGLE_SHEET_ID,
+            range=f"{SHEET_NAME}!A1",
+            valueInputOption="RAW",
+            body=body
+        ).execute()
+        print(f"{result.get('updatedCells')} cells updated in Google Sheet.")
+
+    except HttpError as err:
+        print(err)
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return
+    
 def main(StartDate, EndDate):
     """Main function to execute the script.
     It gets the metrics from Google Analytics, then from YouTube Analytics, and finally from Report Files
@@ -191,6 +297,7 @@ def main(StartDate, EndDate):
     # Fetch YouTube Analytics data
     youtube_analytics_data = fetch_youtube_analytics_data(StartDate, EndDate)
 
+    update_google_sheet(google_analytics_data, youtube_analytics_data)
     print("\nYouTube Analytics Data:")
     for entry in youtube_analytics_data:
         print(f"  Source: {entry['source']}, Views: {entry['views']}")
@@ -205,5 +312,4 @@ def main(StartDate, EndDate):
     print(f"YouTube Total Views: {total_views}")
 
 if __name__ == "__main__":
-    main('2025-01-01', '2025-01-31')
-    
+    main('2025-08-01', '2025-08-31')
