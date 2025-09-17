@@ -9,11 +9,15 @@ from google.analytics.data_v1beta.types import (
     DateRange,
     Dimension,
     Metric,
-    RunReportRequest
+    RunReportRequest,
+    Filter,
+    FilterExpression
 )
 
 dotenv.load_dotenv()
 
+# Date of the new installation of the GA4 property for carreras.itam.mx
+FECHA_NUEVA_INSTALACION = '2024-10-01'
 def fetch_google_analytics_data(StartDate, EndDate):
     """Fetches data from Google Analytics for the specified properties and date range."""
 
@@ -29,9 +33,27 @@ def fetch_google_analytics_data(StartDate, EndDate):
     if not properties['blog.itam.mx']:
         raise ValueError("ITAM_BLOG_GA4_PROPERTY_ID environment variable is not set.")
 
-    properties['carreras.itam.mx'] = os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID")
+    if (EndDate >= FECHA_NUEVA_INSTALACION):
+        properties['carreras.itam.mx'] = os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_NEW")
+    else:
+        properties['carreras.itam.mx'] = os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD")
+        print("Aplicando filtro de hostName para la propiedad antigua de carreras.itam.mx")
+        carreras_filter = FilterExpression(
+            filter=Filter(
+                field_name="hostName",
+                string_filter=Filter.StringFilter(
+                    match_type=Filter.StringFilter.MatchType.EXACT,
+                    value="aspirantes.itam.mx"
+                )
+            )
+        )
+
     if not properties['carreras.itam.mx']:
-        raise ValueError("ITAM_CARRERAS_GA4_PROPERTY_ID environment variable is not set.")
+            raise ValueError("ITAM_CARRERAS_GA4_PROPERTY_ID_NEW environment variable is not set.")
+    else:
+        properties['carreras.itam.mx'] = os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD")
+        if not properties['carreras.itam.mx']:
+            raise ValueError("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD environment variable is not set.")
 
     # Credentials for Google Analytics Data API
     GA4_CREDENTIALS_PATH = os.getenv("GA4_CREDENTIALS_PATH")
@@ -82,7 +104,8 @@ def fetch_google_analytics_data(StartDate, EndDate):
         property=f"properties/{properties['carreras.itam.mx']}",
         metrics=metrics,
         date_ranges=date_ranges,
-        dimensions=dimensions
+        dimensions=dimensions,
+        dimension_filter=carreras_filter if 'carreras_filter' in locals() else None
     )
     # Declares the dictonary to store the results
     results = {}
@@ -312,4 +335,4 @@ def main(StartDate, EndDate):
     print(f"YouTube Total Views: {total_views}")
 
 if __name__ == "__main__":
-    main('2025-08-01', '2025-08-31')
+    main('2024-08-01', '2024-08-31')
