@@ -1,5 +1,6 @@
 import os
 import dotenv
+import pandas as pd
 from google.oauth2.credentials import Credentials
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -15,6 +16,23 @@ from google.analytics.data_v1beta.types import (
 )
 
 dotenv.load_dotenv()
+
+# This dictionary is provisionary to store the metrics name and number for the results file and the Database
+
+metrics_dict = {
+    1: "ITAM Total Users",
+    2: "ITAM Views",
+    3: "ITAM Views Per Session",
+    4: "Blog Total Users",
+    5: "Blog Views",
+    6: "Blog Views Per Session",
+    7: "Carreras Total Users",
+    8: "Carreras Views",
+    9: "Carreras Views Per Session",
+    10: "YouTube Advertisement Views",
+    11: "YouTube Organic Views",
+    12: "YouTube Total Views"
+}
 
 # Date of the new installation of the GA4 property for carreras.itam.mx
 FECHA_NUEVA_INSTALACION = '2024-10-01'
@@ -334,5 +352,93 @@ def main(StartDate, EndDate):
     print(f"YouTube Organic Views: {organic_views}")
     print(f"YouTube Total Views: {total_views}")
 
+    #generates a dataframe with three columns (date, metric, value) for both GA and YouTube data
+    #and saves it to a CSV file
+
+    combined_data = []
+    # Process metrics in the order defined by metrics_dict
+    for metric_number, metric_name in metrics_dict.items():
+        if "ITAM" in metric_name:
+            property_key = "itam.mx"
+        elif "Blog" in metric_name:
+            property_key = "blog.itam.mx"
+        elif "Carreras" in metric_name:
+            property_key = "carreras.itam.mx"
+        else:
+            continue  # Skip YouTube metrics here; handled below
+
+        # Map metric_name to the key used in google_analytics_data
+        if "Total Users" in metric_name:
+            metric_key = "totalUsers"
+        elif "Views Per Session" in metric_name:
+            metric_key = "viewsPerSession"
+        elif "Views" in metric_name:
+            metric_key = "views"
+        else:
+            continue
+
+        value = google_analytics_data.get(property_key, {}).get(metric_key, [0])[0]
+        combined_data.append({
+            "Date": EndDate,
+            "Metric": metric_number,
+            "Value": value
+        })
+
+    for metric_name, metric_number in [("YouTube Advertisement Views", 10), ("YouTube Organic Views", 11), ("YouTube Total Views", 12)]:
+        if metric_name == "YouTube Advertisement Views":
+            value = ad_views
+        elif metric_name == "YouTube Organic Views":
+            value = organic_views
+        elif metric_name == "YouTube Total Views":
+            value = total_views
+        combined_data.append({
+            "Date": EndDate,
+            "Metric": metric_number,
+            "Value": value
+        })
+    combined_df = pd.DataFrame(combined_data)
+    print(combined_df.head(20))
+
+    return combined_df
+
+def get_dates(date):
+    """Given a date in 'YYYY-MM-DD' format, returns the first and last date of that month."""
+    year, month, _ = map(int, date.split('-'))
+    first_date = f"{year}-{month:02d}-01"
+    if month == 12:
+        last_date = f"{year}-12-31"
+    else:
+        next_month = month + 1
+        last_date = f"{year}-{next_month:02d}-01"
+        last_date = pd.to_datetime(last_date) - pd.Timedelta(days=1)
+        last_date = last_date.strftime('%Y-%m-%d')
+    return first_date, last_date
+
 if __name__ == "__main__":
-    main('2024-08-01', '2024-08-31')
+    #this will iterate for all the months from january 2024 to the current month in order to generate the historical data
+    do_historical = False
+    if not do_historical:
+        # Get the current date in 'YYYY-MM-DD' format and changes it for the last day of the last month
+        current_date = pd.Timestamp.now().replace(day=1) - pd.Timedelta(days=1)
+        current_date = current_date.strftime('%Y-%m-%d')
+        #current_date = '2024-01-01'  # For testing purposes, you can set a fixed date here
+        # Get the first and last date of the current month
+        start_date, end_date = get_dates(current_date)
+        print(f"Fetching data from {start_date} to {end_date}")
+        result = main(start_date, end_date)
+        #saves the results to a CSV file
+        result.to_csv(f"historical/results_{current_date}.csv", index=False)
+        print("Results saved to historical/results.csv")
+        exit(0)
+    else:
+        print("Generating historical data from January 2024 to the current month")
+        if not os.path.exists('historical'):
+            os.makedirs('historical')
+        for fecha in pd.date_range(start='2024-01-31', end=pd.Timestamp.now(), freq='MS').strftime('%Y-%m-%d'):
+            print(f"Processing data for the month of {fecha}")
+            result=main(get_dates(fecha)[0], get_dates(fecha)[1])
+            #saves the results to a CSV file
+            result.to_csv(f"historical/results_{fecha}.csv", index=False)
+    
+
+
