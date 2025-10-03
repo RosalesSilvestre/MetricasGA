@@ -418,8 +418,8 @@ if __name__ == "__main__":
     #this will iterate for all the months from january 2024 to the current month in order to generate the historical data
     do_historical = False
     if not do_historical:
-        # Get the current date in 'YYYY-MM-DD' format and changes it for the last day of the last month
-        current_date = pd.Timestamp.now().replace(day=1) - pd.Timedelta(days=1)
+        # Get the current date in 'YYYY-MM-DD' format and changes it for the first day of the previous month
+        current_date = (pd.Timestamp.now().replace(day=1) - pd.DateOffset(months=1))
         current_date = current_date.strftime('%Y-%m-%d')
         #current_date = '2024-01-01'  # For testing purposes, you can set a fixed date here
         # Get the first and last date of the current month
