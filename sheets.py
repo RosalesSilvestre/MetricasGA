@@ -1,7 +1,7 @@
 import os
 import glob
 import pandas as pd
-import numpy as np # <--- SE AGREGA LA IMPORTACIÓN DE NUMPY
+import numpy as np
 import dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -47,35 +47,59 @@ def load_historical_data(folder_path='historical'):
 
 def calculate_advanced_metrics(df):
     """
-    Calculates YTD based on a fiscal year starting in August and fetches 
-    the corresponding values from the previous year.
+    Calculates YTD and YoY metrics, applying SUM for most metrics and 
+    AVERAGE for session-based metrics, based on a fiscal year starting in August.
     """
     if df.empty:
         return df
 
-    # <--- CAMBIO CLAVE: Determinar el año fiscal ---
-    # Si el mes es >= 8 (Agosto), el año fiscal es el año actual.
-    # Si no, el año fiscal es el año anterior.
+    # --- Lógica de Año Fiscal (sin cambios) ---
     df['fiscal_year'] = np.where(df['Date'].dt.month >= 8, 
                                 df['Date'].dt.year, 
                                 df['Date'].dt.year - 1)
 
-    # <--- CAMBIO CLAVE: Usar el año fiscal para agrupar y calcular el YTD ---
-    # La suma acumulada (cumsum) ahora se reiniciará cada agosto.
-    df['ytd'] = df.groupby(['Metric', 'fiscal_year'])['Value'].cumsum()
+    # --- CAMBIO CLAVE: Lógica de Agregación Diferenciada ---
 
-    # Los cálculos de YoY no cambian, ya que se basan en un desplazamiento de 12 meses
-    df['year_over_year'] = df.groupby('Metric')['Value'].shift(12)
-    df['ytd_over_year'] = df.groupby('Metric')['ytd'].shift(12)
+    # 1. Definir qué métricas se promedian en lugar de sumarse
+    metrics_to_average = [
+        "ITAM Views Per Session",
+        "Blog Views Per Session",
+        "Carreras Views Per Session"
+    ]
 
-    # Se mantiene el resto de la función para limpiar y dar formato
-    final_df = df[[
+    # 2. Separar el DataFrame en dos, según la lógica de agregación
+    df_sum = df[~df['Metric'].isin(metrics_to_average)].copy()
+    df_avg = df[df['Metric'].isin(metrics_to_average)].copy()
+
+    # 3. Calcular YTD para las métricas que se SUMAN (lógica anterior)
+    if not df_sum.empty:
+        df_sum['ytd'] = df_sum.groupby(['Metric', 'fiscal_year'])['Value'].cumsum()
+
+    # 4. Calcular YTD para las métricas que se PROMEDIAN
+    if not df_avg.empty:
+        # .expanding().mean() calcula el promedio de todos los valores desde el inicio del grupo
+        # hasta la fila actual, lo que es un "promedio acumulado".
+        ytd_avg = df_avg.groupby(['Metric', 'fiscal_year'])['Value'].expanding().mean()
+        # El resultado de expanding tiene un multi-índice, lo reseteamos para que coincida
+        df_avg['ytd'] = ytd_avg.reset_index(level=[0,1], drop=True)
+
+    # 5. Unir los DataFrames y ordenar para asegurar la consistencia antes de los cálculos YoY
+    df_final = pd.concat([df_sum, df_avg])
+    df_final.sort_values(by=['Metric', 'Date'], inplace=True)
+
+    # 6. Calcular métricas YoY sobre el DF completo y ordenado
+    df_final['year_over_year'] = df_final.groupby('Metric')['Value'].shift(12)
+    df_final['ytd_over_year'] = df_final.groupby('Metric')['ytd'].shift(12)
+
+    # --- Formato de salida (sin cambios) ---
+    final_df_formatted = df_final[[
         'Date', 'Metric', 'Value', 'ytd', 'year_over_year', 'ytd_over_year'
     ]].copy()
     
-    final_df['Date'] = final_df['Date'].dt.strftime('%Y-%m-%d')
+    final_df_formatted['Date'] = final_df_formatted['Date'].dt.strftime('%Y-%m-%d')
     
-    return final_df
+    return final_df_formatted
+
 
 def update_google_sheet(df):
     """
@@ -132,27 +156,20 @@ def main():
     """
     print("🚀 Starting metrics aggregation process...")
     
-    # 1. Load ALL historical data to ensure correct YoY/YTD calculations
     historical_df = load_historical_data()
     if historical_df.empty:
         print("No data found. Exiting.")
         return
 
-    # 2. Identify the last month from the datetime of the system and gets the last day of that month
     latest_date = pd.to_datetime("today").replace(day=1) - pd.DateOffset(days=1)
-
     print(f"Identified the last month as: {latest_date.strftime('%B %Y')}")
 
-    # 3. Calculate advanced metrics for the ENTIRE dataset
     final_metrics_df = calculate_advanced_metrics(historical_df)
     
-    # 4. Filter the results to include ONLY the last month data
-    # The 'Date' column in final_metrics_df is a string 'YYYY-MM-DD', so we format for comparison
     latest_date_str = latest_date.strftime('%Y-%m-%d')
     last_month_df = final_metrics_df[final_metrics_df['Date'] == latest_date_str].copy()
     print(f"Filtering data to upload only for {latest_date_str}.")
     
-    # 5. Update the Google Sheet with just the filtered, last-month data
     update_google_sheet(last_month_df)
     
     print("✨ Process complete.")

@@ -1,4 +1,5 @@
 import os
+import argparse
 import dotenv
 import pandas as pd
 from google.oauth2.credentials import Credentials
@@ -53,8 +54,12 @@ def fetch_google_analytics_data(StartDate, EndDate):
 
     if (EndDate >= FECHA_NUEVA_INSTALACION):
         properties['carreras.itam.mx'] = os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_NEW")
+        if not properties['carreras.itam.mx']:
+            raise ValueError("ITAM_CARRERAS_GA4_PROPERTY_ID_NEW environment variable is not set.")
     else:
         properties['carreras.itam.mx'] = os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD")
+        if not properties['carreras.itam.mx']:
+            raise ValueError("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD environment variable is not set.")
         print("Aplicando filtro de hostName para la propiedad antigua de carreras.itam.mx")
         carreras_filter = FilterExpression(
             filter=Filter(
@@ -65,13 +70,6 @@ def fetch_google_analytics_data(StartDate, EndDate):
                 )
             )
         )
-
-    if not properties['carreras.itam.mx']:
-            raise ValueError("ITAM_CARRERAS_GA4_PROPERTY_ID_NEW environment variable is not set.")
-    else:
-        properties['carreras.itam.mx'] = os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD")
-        if not properties['carreras.itam.mx']:
-            raise ValueError("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD environment variable is not set.")
 
     # Credentials for Google Analytics Data API
     GA4_CREDENTIALS_PATH = os.getenv("GA4_CREDENTIALS_PATH")
@@ -123,7 +121,7 @@ def fetch_google_analytics_data(StartDate, EndDate):
         metrics=metrics,
         date_ranges=date_ranges,
         dimensions=dimensions,
-        dimension_filter=carreras_filter if 'carreras_filter' in locals() else None
+        dimension_filter=carreras_filter if EndDate < FECHA_NUEVA_INSTALACION else None
     )
     # Declares the dictonary to store the results
     results = {}
@@ -415,30 +413,50 @@ def get_dates(date):
     return first_date, last_date
 
 if __name__ == "__main__":
-    #this will iterate for all the months from january 2024 to the current month in order to generate the historical data
-    do_historical = False
-    if not do_historical:
+    parser = argparse.ArgumentParser(description='Fetch GA4 and YouTube metrics')
+    parser.add_argument('--mode', 
+                       choices=['historical', 'current'], 
+                       default='historical',
+                       help='Mode: "historical" for finalized monthly data, "current" for current month progress')
+    
+    args = parser.parse_args()
+    
+    if args.mode == 'current':
+        # Current month mode: fetch from 1st of current month to yesterday
+        today = pd.Timestamp.now()
+        start_date = today.replace(day=1).strftime('%Y-%m-%d')
+        end_date = (today - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+        
+        print(f"🔄 Current Month Mode: Fetching data from {start_date} to {end_date}")
+        result = main(start_date, end_date)
+        
+        # Ensure staging folder exists
+        if not os.path.exists('staging'):
+            os.makedirs('staging')
+        
+        # Save to staging folder (overwrites existing file)
+        staging_file = 'staging/current_month_progress.csv'
+        result.to_csv(staging_file, index=False)
+        print(f"✅ Results saved to {staging_file}")
+        
+    else:  # historical mode (default)
         # Get the current date in 'YYYY-MM-DD' format and changes it for the first day of the previous month
         current_date = (pd.Timestamp.now().replace(day=1) - pd.DateOffset(months=1))
         current_date = current_date.strftime('%Y-%m-%d')
-        #current_date = '2024-01-01'  # For testing purposes, you can set a fixed date here
-        # Get the first and last date of the current month
+        
+        # Get the first and last date of the previous month
         start_date, end_date = get_dates(current_date)
-        print(f"Fetching data from {start_date} to {end_date}")
+        print(f"📊 Historical Mode: Fetching data from {start_date} to {end_date}")
         result = main(start_date, end_date)
-        #saves the results to a CSV file
-        result.to_csv(f"historical/results_{current_date}.csv", index=False)
-        print("Results saved to historical/results.csv")
-        exit(0)
-    else:
-        print("Generating historical data from January 2024 to the current month")
+        
+        # Ensure historical folder exists
         if not os.path.exists('historical'):
             os.makedirs('historical')
-        for fecha in pd.date_range(start='2024-01-31', end=pd.Timestamp.now(), freq='MS').strftime('%Y-%m-%d'):
-            print(f"Processing data for the month of {fecha}")
-            result=main(get_dates(fecha)[0], get_dates(fecha)[1])
-            #saves the results to a CSV file
-            result.to_csv(f"historical/results_{fecha}.csv", index=False)
+        
+        # Save to historical folder
+        historical_file = f"historical/results_{current_date}.csv"
+        result.to_csv(historical_file, index=False)
+        print(f"✅ Results saved to {historical_file}")
     
 
 
