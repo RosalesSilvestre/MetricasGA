@@ -1,462 +1,260 @@
 import os
-import argparse
+import datetime
 import dotenv
-import pandas as pd
-from google.oauth2.credentials import Credentials
+import mysql.connector
+from mysql.connector import Error
+
+# Google Libraries
 from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+from google.oauth2.credentials import Credentials
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import (
-    DateRange,
-    Dimension,
-    Metric,
-    RunReportRequest,
-    Filter,
-    FilterExpression
+    DateRange, Metric, RunReportRequest, Filter, FilterExpression
 )
+from googleapiclient.discovery import build
 
 dotenv.load_dotenv()
 
-# This dictionary is provisionary to store the metrics name and number for the results file and the Database
+# ==========================================
+#      ZONA DE CONFIGURACIÓN (EDITAR AQUÍ)
+# ==========================================
 
-metrics_dict = {
-    1: "ITAM Total Users",
-    2: "ITAM Views",
-    3: "ITAM Views Per Session",
-    4: "Blog Total Users",
-    5: "Blog Views",
-    6: "Blog Views Per Session",
-    7: "Carreras Total Users",
-    8: "Carreras Views",
-    9: "Carreras Views Per Session",
-    10: "YouTube Advertisement Views",
-    11: "YouTube Organic Views",
-    12: "YouTube Total Views"
+CONFIG = {
+    # MODOS DISPONIBLES:
+    # 'month'      -> Procesa un solo mes.
+    # 'soft_reset' -> Recorre el histórico e inserta SOLO lo que falte (rápido).
+    # 'hard_reset' -> Borra y reescribe el histórico completo (lento, borra datos previos).
+    "MODE": "soft_reset", 
+
+    # CONFIGURACIÓN PARA MODO 'month':
+    # 'YYYY-MM' -> Para procesar un mes específico (ej: '2024-01').
+    # None      -> Para procesar automáticamente el mes anterior al actual.
+    "TARGET_MONTH": None, 
+
+    # CONFIGURACIÓN PARA MODO HISTÓRICO ('soft_reset' o 'hard_reset'):
+    # Año desde el cual empezar a verificar/reconstruir.
+    "START_YEAR": 2023 
 }
 
-# Date of the new installation of the GA4 property for carreras.itam.mx
-FECHA_NUEVA_INSTALACION = '2024-10-01'
-def fetch_google_analytics_data(StartDate, EndDate):
-    """Fetches data from Google Analytics for the specified properties and date range."""
+# ==========================================
+#          FIN DE CONFIGURACIÓN
+# ==========================================
 
-    # Configuration
-    # Properties to fetch data from
-    properties = {}
+# Mapeo de IDs de Base de Datos
+METRICS_MAP = {
+    "itam.mx":          {"totalUsers": 1, "views": 2, "viewsPerSession": 3},
+    "blog.itam.mx":     {"totalUsers": 4, "views": 5, "viewsPerSession": 6},
+    "carreras.itam.mx": {"totalUsers": 7, "views": 8, "viewsPerSession": 9},
+    "youtube":          {"ads": 10, "organic": 11, "total": 12}
+}
 
-    properties['itam.mx'] = os.getenv("ITAM_GA4_PROPERTY_ID")
-    if not properties['itam.mx']:
-        raise ValueError("ITAM_GA4_PROPERTY_ID environment variable is not set.")
-    
-    properties['blog.itam.mx'] = os.getenv("ITAM_BLOG_GA4_PROPERTY_ID")
-    if not properties['blog.itam.mx']:
-        raise ValueError("ITAM_BLOG_GA4_PROPERTY_ID environment variable is not set.")
+FECHA_CAMBIO_GA4 = '2024-10-01'
 
-    if (EndDate >= FECHA_NUEVA_INSTALACION):
-        properties['carreras.itam.mx'] = os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_NEW")
-        if not properties['carreras.itam.mx']:
-            raise ValueError("ITAM_CARRERAS_GA4_PROPERTY_ID_NEW environment variable is not set.")
-    else:
-        properties['carreras.itam.mx'] = os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD")
-        if not properties['carreras.itam.mx']:
-            raise ValueError("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD environment variable is not set.")
-        print("Aplicando filtro de hostName para la propiedad antigua de carreras.itam.mx")
-        carreras_filter = FilterExpression(
-            filter=Filter(
-                field_name="hostName",
-                string_filter=Filter.StringFilter(
-                    match_type=Filter.StringFilter.MatchType.EXACT,
-                    value="aspirantes.itam.mx"
-                )
-            )
-        )
-
-    # Credentials for Google Analytics Data API
-    GA4_CREDENTIALS_PATH = os.getenv("GA4_CREDENTIALS_PATH")
-
-    if not GA4_CREDENTIALS_PATH:
-        raise ValueError("GA4_CREDENTIALS_PATH environment variable is not set.")
-
-    ga4_credentials= service_account.Credentials.from_service_account_file(
-        GA4_CREDENTIALS_PATH,
-        scopes=["https://www.googleapis.com/auth/analytics.readonly"]
-    )
-
-    # Creates a client for the Google Analytics Data API
-    client = BetaAnalyticsDataClient(credentials=ga4_credentials)
-    
-    #Defines the metrics and dimensions to fetch
-    metrics_list = ["totalUsers","screenPageViews",  "screenPageViewsPerSession"]
-    dimensions_list = []
-
-    # Transforms the list of metrics,dimensions and the date_ranges into the required format
-    metrics = [
-        Metric(name=metric) for metric in metrics_list
-    ]
-    
-    dimensions = [
-        Dimension(name=dimension) for dimension in dimensions_list
-    ]
-    date_ranges = [
-        DateRange(start_date=StartDate, end_date=EndDate)
-    ]
-    
-    # Creates the request for both properties
-    request_itam = RunReportRequest(
-        property=f"properties/{properties['itam.mx']}",
-        metrics=metrics,
-        date_ranges=date_ranges,
-        dimensions=dimensions
-    )
-
-    request_blog = RunReportRequest(
-        property=f"properties/{properties['blog.itam.mx']}",
-        metrics=metrics,
-        date_ranges=date_ranges,
-        dimensions=dimensions
-    )
-
-    request_carreras = RunReportRequest(
-        property=f"properties/{properties['carreras.itam.mx']}",
-        metrics=metrics,
-        date_ranges=date_ranges,
-        dimensions=dimensions,
-        dimension_filter=carreras_filter if EndDate < FECHA_NUEVA_INSTALACION else None
-    )
-    # Declares the dictonary to store the results
-    results = {}
-
-    # Fetches the data for both properties
-    try:
-        # Fetches the data for itam.mx
-        response_itam = client.run_report(request_itam)
-
-        #Parse the response into a dictionary
-        if not response_itam.rows:
-            print("No data found for itam.mx")
-            results['itam.mx'] = {}
-        else:
-            results['itam.mx'] = {
-                "totalUsers": [int(row.metric_values[0].value) for row in response_itam.rows],
-                "views": [int(row.metric_values[1].value) for row in response_itam.rows],
-                "viewsPerSession": [round(float(row.metric_values[2].value),2) for row in response_itam.rows],
-            }
-    except Exception as e:
-        print(f"Error fetching data for itam.mx: {e}")
-        response_itam = None
-    try:
-        # Fetches the data for blog.itam.mx
-        response_blog = client.run_report(request_blog)
-
-        #Parse the response into a dictionary
-        if not response_blog.rows:
-            print("No data found for blog.itam.mx")
-            results['blog.itam.mx'] = {}
-        else:
-            results['blog.itam.mx'] = {
-                "totalUsers": [int(row.metric_values[0].value) for row in response_blog.rows],
-                "views": [int(row.metric_values[1].value) for row in response_blog.rows],
-                "viewsPerSession": [round(float(row.metric_values[2].value),2) for row in response_blog.rows],
-            }
-
-    except Exception as e:
-        print(f"Error fetching data for blog.itam.mx: {e}")
-        response_blog = None
-
-    try:
-        # Fetches the data for carreras.itam.mx
-        response_carreras = client.run_report(request_carreras)
-
-        #Parse the response into a dictionary
-        if not response_carreras.rows:
-            print("No data found for carreras.itam.mx")
-            results['carreras.itam.mx'] = {}
-        else:
-            results['carreras.itam.mx'] = {
-                "totalUsers": [int(row.metric_values[0].value) for row in response_carreras.rows],
-                "views": [int(row.metric_values[1].value) for row in response_carreras.rows],
-                "viewsPerSession": [round(float(row.metric_values[2].value),2) for row in response_carreras.rows],
-            }
-    except Exception as e:
-        print(f"Error fetching data for carreras.itam.mx: {e}")
-        response_carreras = None
-
-    return results
-
-def fetch_youtube_analytics_data( start_date, end_date):
-    # --- Configuration ---
-    # The file client_secret.json contains your OAuth 2.0 client credentials.
-    CLIENT_SECRETS_FILE = os.getenv("CLIENT_SECRETS_FILE")
-
-    if not CLIENT_SECRETS_FILE:
-        raise ValueError("CLIENT_SECRETS_FILE environment variable is not set.")
-
-    # The scope for the YouTube Analytics API.
-    # This scope allows access to YouTube Analytics data.
-    SCOPES = ["https://www.googleapis.com/auth/youtube.readonly",
-            "https://www.googleapis.com/auth/yt-analytics.readonly"]
-
-    # Path to store the user's access and refresh tokens.
-    TOKEN_FILE = os.getenv("TOKEN_FILE")
-
-    if not TOKEN_FILE:
-        raise ValueError("TOKEN_FILE environment variable is not set.")
-
-    """Authenticates with Google and returns a YouTube Analytics service object."""
-    credentials = None
-    # The file token.json stores the user's access and refresh tokens, and is
-    # created automatically when the authorization flow completes for the first
-    # time.
-    if os.path.exists(TOKEN_FILE):
-        credentials = Credentials.from_authorized_user_file(
-            TOKEN_FILE, SCOPES
-        )
-
-    youtube_analytics_service =build("youtubeAnalytics", "v2", credentials=credentials)
-
-    # --- Main Script ---
-    try:
-        response = youtube_analytics_service.reports().query(
-            ids=f"channel==MINE",
-            startDate=start_date,
-            endDate=end_date,
-            metrics="views",
-            dimensions="insightTrafficSourceType",
-            #sort="month"
-        ).execute()
-
-        results = []
-        if "rows" in response:
-            for row in response["rows"]:
-                source = row[0]
-                views = row[1]
-                results.append({
-                    "source": source,
-                    "views": views
-                })
-        return results
-
-    except HttpError as e:
-        print(f"An HTTP error {e.resp.status} occurred: {e.content}")
-        return []
-
-def update_google_sheet(google_analytics_data, youtube_analytics_data):
-    """
-    Updates a Google Sheet with the provided analytics data.
-    """
-    try:
-        # --- Configuration for Google Sheets ---
-        GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-        if not GOOGLE_SHEET_ID:
-            raise ValueError("GOOGLE_SHEET_ID environment variable is not set.")
-
-        GOOGLE_SHEETS_CREDENTIALS_PATH = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH")
-        if not GOOGLE_SHEETS_CREDENTIALS_PATH:
-            raise ValueError("GOOGLE_SHEETS_CREDENTIALS_PATH environment variable is not set.")
-
-        SHEET_NAME = "Analytics" # Or the name of the sheet you want to update
-        
-        # --- Authentication ---
-        creds = service_account.Credentials.from_service_account_file(
-            GOOGLE_SHEETS_CREDENTIALS_PATH,
-            scopes=['https://www.googleapis.com/auth/spreadsheets']
-        )
-        service = build('sheets', 'v4', credentials=creds)
-        sheet = service.spreadsheets()
-
-        # --- Prepare the data for the sheet ---
-        # Get the first value from the lists, or use 0 if the list is empty
-        itam_total_users = google_analytics_data.get('itam.mx', {}).get('totalUsers', [0])[0]
-        itam_views = google_analytics_data.get('itam.mx', {}).get('views', [0])[0]
-        itam_views_per_session = google_analytics_data.get('itam.mx', {}).get('viewsPerSession', [0])[0]
-
-        blog_total_users = google_analytics_data.get('blog.itam.mx', {}).get('totalUsers', [0])[0]
-        blog_views = google_analytics_data.get('blog.itam.mx', {}).get('views', [0])[0]
-        blog_views_per_session = google_analytics_data.get('blog.itam.mx', {}).get('viewsPerSession', [0])[0]
-
-        carreras_total_users = google_analytics_data.get('carreras.itam.mx', {}).get('totalUsers', [0])[0]
-        carreras_views = google_analytics_data.get('carreras.itam.mx', {}).get('views', [0])[0]
-        carreras_views_per_session = google_analytics_data.get('carreras.itam.mx', {}).get('viewsPerSession', [0])[0]
-
-        # Calculate YouTube views
-        ad_views = sum(int(entry['views']) for entry in youtube_analytics_data if entry['source'] == 'ADVERTISING')
-        total_views = sum(int(entry['views']) for entry in youtube_analytics_data)
-        organic_views = total_views - ad_views
-
-        # Define the data to be written
-        values = [
-            ["Metric", "Value"],
-            ["ITAM Total Users", itam_total_users],
-            ["ITAM Views", itam_views],
-            ["ITAM Views Per Session", itam_views_per_session],
-            ["Blog Total Users", blog_total_users],
-            ["Blog Views", blog_views],
-            ["Blog Views Per Session", blog_views_per_session],
-            ["Carreras Total Users", carreras_total_users],
-            ["Carreras Views", carreras_views],
-            ["Carreras Views Per Session", carreras_views_per_session],
-            ["YouTube Advertisement Views", ad_views],
-            ["YouTube Organic Views", organic_views],
-            ["YouTube Total Views", total_views]
-        ]
-
-        # --- Write data to the sheet ---
-        body = {
-            'values': values
+class MetricsETL:
+    def __init__(self):
+        self.db_config = {
+            'host': os.getenv("DB_HOST", "localhost"),
+            'database': os.getenv("DB_NAME", "tu_base_de_datos"),
+            'user': os.getenv("DB_USER", "root"),
+            'password': os.getenv("DB_PASSWORD", ""),
         }
-        result = sheet.values().update(
-            spreadsheetId=GOOGLE_SHEET_ID,
-            range=f"{SHEET_NAME}!A1",
-            valueInputOption="RAW",
-            body=body
-        ).execute()
-        print(f"{result.get('updatedCells')} cells updated in Google Sheet.")
+        self.ga4_client = self._init_ga4_client()
+        self.yt_client = self._init_yt_client()
 
-    except HttpError as err:
-        print(err)
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        return
-    
-def main(StartDate, EndDate):
-    """Main function to execute the script.
-    It gets the metrics from Google Analytics, then from YouTube Analytics, and finally from Report Files
-    
-    and saves the results to a CSV file."""
-    # Fetch Google Analytics data
-    google_analytics_data = fetch_google_analytics_data(StartDate, EndDate)
+    def _init_ga4_client(self):
+        path = os.getenv("GA4_CREDENTIALS_PATH")
+        if not path: raise ValueError("Falta GA4_CREDENTIALS_PATH en .env")
+        creds = service_account.Credentials.from_service_account_file(
+            path, scopes=["https://www.googleapis.com/auth/analytics.readonly"]
+        )
+        return BetaAnalyticsDataClient(credentials=creds)
 
-    print("Google Analytics Data:")
-    for property_name, data in google_analytics_data.items():
-        print(f"{property_name}:")
-        print(f"  Total Users: {data.get('totalUsers', 'No data')[0]}")
-        print(f"  Views: {data.get('views', 'No data')[0]}")
-        print(f"  Views per Session: {data.get('viewsPerSession', 'No data')[0]}")
+    def _init_yt_client(self):
+        token_path = os.getenv("TOKEN_FILE")
+        if not token_path or not os.path.exists(token_path):
+            print("⚠️  Advertencia: No se encontró token de YouTube. Las métricas de YT serán 0.")
+            return None
+        creds = Credentials.from_authorized_user_file(
+            token_path, ["https://www.googleapis.com/auth/yt-analytics.readonly"]
+        )
+        return build("youtubeAnalytics", "v2", credentials=creds)
 
-    # Fetch YouTube Analytics data
-    youtube_analytics_data = fetch_youtube_analytics_data(StartDate, EndDate)
-
-    update_google_sheet(google_analytics_data, youtube_analytics_data)
-    print("\nYouTube Analytics Data:")
-    for entry in youtube_analytics_data:
-        print(f"  Source: {entry['source']}, Views: {entry['views']}")
-
-    # Calculates advertisement views and total views from YouTube data
-    ad_views = sum(int(entry['views']) for entry in youtube_analytics_data if entry['source'] == 'ADVERTISING')
-    total_views = sum(int(entry['views']) for entry in youtube_analytics_data)
-    organic_views = total_views - ad_views
-
-    print(f"\nYouTube Advertisement Views: {ad_views}")
-    print(f"YouTube Organic Views: {organic_views}")
-    print(f"YouTube Total Views: {total_views}")
-
-    #generates a dataframe with three columns (date, metric, value) for both GA and YouTube data
-    #and saves it to a CSV file
-
-    combined_data = []
-    # Process metrics in the order defined by metrics_dict
-    for metric_number, metric_name in metrics_dict.items():
-        if "ITAM" in metric_name:
-            property_key = "itam.mx"
-        elif "Blog" in metric_name:
-            property_key = "blog.itam.mx"
-        elif "Carreras" in metric_name:
-            property_key = "carreras.itam.mx"
+    def get_date_range(self, year, month):
+        start_date = datetime.date(year, month, 1)
+        if month == 12:
+            end_date = datetime.date(year, 12, 31)
         else:
-            continue  # Skip YouTube metrics here; handled below
+            end_date = datetime.date(year, month + 1, 1) - datetime.timedelta(days=1)
+        return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
-        # Map metric_name to the key used in google_analytics_data
-        if "Total Users" in metric_name:
-            metric_key = "totalUsers"
-        elif "Views Per Session" in metric_name:
-            metric_key = "viewsPerSession"
-        elif "Views" in metric_name:
-            metric_key = "views"
+    def fetch_ga4(self, start_date, end_date):
+        data_points = []
+        
+        properties_config = {
+            'itam.mx': {'id': os.getenv("ITAM_GA4_PROPERTY_ID"), 'filter': None},
+            'blog.itam.mx': {'id': os.getenv("ITAM_BLOG_GA4_PROPERTY_ID"), 'filter': None}
+        }
+
+        # Lógica de cambio de propiedad Carreras
+        if start_date >= FECHA_CAMBIO_GA4:
+            properties_config['carreras.itam.mx'] = {
+                'id': os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_NEW"),
+                'filter': None
+            }
         else:
-            continue
+            filtr = FilterExpression(
+                filter=Filter(field_name="hostName", string_filter=Filter.StringFilter(value="aspirantes.itam.mx"))
+            )
+            properties_config['carreras.itam.mx'] = {
+                'id': os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD"),
+                'filter': filtr
+            }
 
-        value = google_analytics_data.get(property_key, {}).get(metric_key, [0])[0]
-        combined_data.append({
-            "Date": EndDate,
-            "Metric": metric_number,
-            "Value": value
-        })
+        for name, config in properties_config.items():
+            if not config['id']: continue
+            
+            req = RunReportRequest(
+                property=f"properties/{config['id']}",
+                metrics=[Metric(name="totalUsers"), Metric(name="screenPageViews"), Metric(name="screenPageViewsPerSession")],
+                date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+                dimension_filter=config['filter']
+            )
 
-    for metric_name, metric_number in [("YouTube Advertisement Views", 10), ("YouTube Organic Views", 11), ("YouTube Total Views", 12)]:
-        if metric_name == "YouTube Advertisement Views":
-            value = ad_views
-        elif metric_name == "YouTube Organic Views":
-            value = organic_views
-        elif metric_name == "YouTube Total Views":
-            value = total_views
-        combined_data.append({
-            "Date": EndDate,
-            "Metric": metric_number,
-            "Value": value
-        })
-    combined_df = pd.DataFrame(combined_data)
-    print(combined_df.head(20))
+            try:
+                resp = self.ga4_client.run_report(req)
+                if resp.rows:
+                    row = resp.rows[0]
+                    vals = {
+                        "totalUsers": int(row.metric_values[0].value),
+                        "views": int(row.metric_values[1].value),
+                        "viewsPerSession": round(float(row.metric_values[2].value), 2)
+                    }
+                    for key, val in vals.items():
+                        metric_id = METRICS_MAP[name][key]
+                        data_points.append((end_date, metric_id, val))
+            except Exception as e:
+                print(f"❌ Error GA4 en {name}: {e}")
+        
+        return data_points
 
-    return combined_df
+    def fetch_youtube(self, start_date, end_date):
+        data_points = []
+        if not self.yt_client: return []
 
-def get_dates(date):
-    """Given a date in 'YYYY-MM-DD' format, returns the first and last date of that month."""
-    year, month, _ = map(int, date.split('-'))
-    first_date = f"{year}-{month:02d}-01"
-    if month == 12:
-        last_date = f"{year}-12-31"
-    else:
-        next_month = month + 1
-        last_date = f"{year}-{next_month:02d}-01"
-        last_date = pd.to_datetime(last_date) - pd.Timedelta(days=1)
-        last_date = last_date.strftime('%Y-%m-%d')
-    return first_date, last_date
+        try:
+            resp = self.yt_client.reports().query(
+                ids="channel==MINE",
+                startDate=start_date,
+                endDate=end_date,
+                metrics="views",
+                dimensions="insightTrafficSourceType"
+            ).execute()
+
+            ad_views = 0
+            total_views = 0
+
+            if "rows" in resp:
+                for row in resp["rows"]:
+                    source, views = row[0], int(row[1])
+                    total_views += views
+                    if source == 'ADVERTISING':
+                        ad_views += views
+            
+            organic_views = total_views - ad_views
+
+            data_points.append((end_date, METRICS_MAP['youtube']['ads'], ad_views))
+            data_points.append((end_date, METRICS_MAP['youtube']['organic'], organic_views))
+            data_points.append((end_date, METRICS_MAP['youtube']['total'], total_views))
+
+        except Exception as e:
+            print(f"❌ Error YouTube: {e}")
+        
+        return data_points
+
+    def save_to_db(self, data, mode='soft'):
+        if not data:
+            print("⚠️  No hay datos para guardar.")
+            return
+
+        # soft = INSERT IGNORE (solo llena huecos)
+        # hard = REPLACE INTO (sobrescribe todo)
+        query_type = "INSERT IGNORE" if mode == 'soft' else "REPLACE"
+        sql = f"{query_type} INTO comunicacion (fecha, metrica, valor) VALUES (%s, %s, %s)"
+
+        try:
+            conn = mysql.connector.connect(**self.db_config)
+            cursor = conn.cursor()
+            cursor.executemany(sql, data)
+            conn.commit()
+            print(f"✅ DB: {cursor.rowcount} registros procesados ({mode}).")
+
+        except Error as e:
+            print(f"🔥 Error de Base de Datos: {e}")
+        finally:
+            if 'conn' in locals() and conn.is_connected():
+                cursor.close()
+                conn.close()
+
+    def process_month(self, year, month, mode):
+        start, end = self.get_date_range(year, month)
+        print(f"🔄 Procesando periodo: {start} al {end} ...")
+        
+        ga_data = self.fetch_ga4(start, end)
+        yt_data = self.fetch_youtube(start, end)
+        
+        full_data = ga_data + yt_data
+        self.save_to_db(full_data, mode)
+
+    def run_historical(self, start_year, mode):
+        today = datetime.date.today()
+        print(f"🚀 Iniciando carga histórica desde {start_year} (Modo: {mode})")
+        
+        for year in range(start_year, today.year + 1):
+            start_month = 1
+            end_month = 12
+            
+            if year == today.year:
+                end_month = today.month - 1 
+            
+            # Si estamos en enero, el loop anterior no corre para el año actual, ajustamos
+            if end_month < 1: 
+                continue
+
+            for month in range(start_month, end_month + 1):
+                self.process_month(year, month, mode)
+
+# ==========================================
+#           EJECUCIÓN PRINCIPAL
+# ==========================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Fetch GA4 and YouTube metrics')
-    parser.add_argument('--mode', 
-                       choices=['historical', 'current'], 
-                       default='historical',
-                       help='Mode: "historical" for finalized monthly data, "current" for current month progress')
-    
-    args = parser.parse_args()
-    
-    if args.mode == 'current':
-        # Current month mode: fetch from 1st of current month to yesterday
-        today = pd.Timestamp.now()
-        start_date = today.replace(day=1).strftime('%Y-%m-%d')
-        end_date = (today - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
-        
-        print(f"🔄 Current Month Mode: Fetching data from {start_date} to {end_date}")
-        result = main(start_date, end_date)
-        
-        # Ensure staging folder exists
-        if not os.path.exists('staging'):
-            os.makedirs('staging')
-        
-        # Save to staging folder (overwrites existing file)
-        staging_file = 'staging/current_month_progress.csv'
-        result.to_csv(staging_file, index=False)
-        print(f"✅ Results saved to {staging_file}")
-        
-    else:  # historical mode (default)
-        # Get the current date in 'YYYY-MM-DD' format and changes it for the first day of the previous month
-        current_date = (pd.Timestamp.now().replace(day=1) - pd.DateOffset(months=1))
-        current_date = current_date.strftime('%Y-%m-%d')
-        
-        # Get the first and last date of the previous month
-        start_date, end_date = get_dates(current_date)
-        print(f"📊 Historical Mode: Fetching data from {start_date} to {end_date}")
-        result = main(start_date, end_date)
-        
-        # Ensure historical folder exists
-        if not os.path.exists('historical'):
-            os.makedirs('historical')
-        
-        # Save to historical folder
-        historical_file = f"historical/results_{current_date}.csv"
-        result.to_csv(historical_file, index=False)
-        print(f"✅ Results saved to {historical_file}")
-    
+    etl = MetricsETL()
+    mode = CONFIG["MODE"]
 
+    if mode == 'month':
+        target = CONFIG["TARGET_MONTH"]
+        
+        if target:
+            # Caso 1: Mes específico definido por usuario
+            year, month = map(int, target.split('-'))
+            print(f"📅 Modo Mensual Manual: {target}")
+            etl.process_month(year, month, mode='hard') # Siempre hard para actualizaciones manuales
+            
+        else:
+            # Caso 2: Automático (Mes anterior)
+            today = datetime.date.today()
+            first_day_this_month = today.replace(day=1)
+            prev_month_date = first_day_this_month - datetime.timedelta(days=1)
+            
+            print(f"📅 Modo Mensual Automático: {prev_month_date.strftime('%Y-%m')}")
+            etl.process_month(prev_month_date.year, prev_month_date.month, mode='hard')
 
+    elif mode in ['soft_reset', 'hard_reset']:
+        # Caso 3: Cargas históricas
+        # soft_reset -> 'soft' para INSERT IGNORE
+        # hard_reset -> 'hard' para REPLACE INTO
+        db_mode = 'soft' if mode == 'soft_reset' else 'hard'
+        etl.run_historical(CONFIG["START_YEAR"], db_mode)
+
+    else:
+        print(f"❌ Error: El modo '{mode}' no es válido en la configuración.")
