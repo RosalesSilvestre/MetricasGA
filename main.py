@@ -1,260 +1,264 @@
 import os
 import datetime
+import calendar
 import dotenv
 import mysql.connector
 from mysql.connector import Error
 
 # Google Libraries
 from google.oauth2 import service_account
-from google.oauth2.credentials import Credentials
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
-from google.analytics.data_v1beta.types import (
-    DateRange, Metric, RunReportRequest, Filter, FilterExpression
-)
+# IMPORTANTE: Importamos todo el módulo de tipos para evitar errores de importación individual
+from google.analytics.data_v1beta import types 
 from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials # Necesario para YouTube
 
 dotenv.load_dotenv()
 
 # ==========================================
-#      ZONA DE CONFIGURACIÓN (EDITAR AQUÍ)
+#      CONFIGURACIÓN
 # ==========================================
 
 CONFIG = {
-    # MODOS DISPONIBLES:
-    # 'month'      -> Procesa un solo mes.
-    # 'soft_reset' -> Recorre el histórico e inserta SOLO lo que falte (rápido).
-    # 'hard_reset' -> Borra y reescribe el histórico completo (lento, borra datos previos).
-    "MODE": "soft_reset", 
-
-    # CONFIGURACIÓN PARA MODO 'month':
-    # 'YYYY-MM' -> Para procesar un mes específico (ej: '2024-01').
-    # None      -> Para procesar automáticamente el mes anterior al actual.
-    "TARGET_MONTH": None, 
-
-    # CONFIGURACIÓN PARA MODO HISTÓRICO ('soft_reset' o 'hard_reset'):
-    # Año desde el cual empezar a verificar/reconstruir.
-    "START_YEAR": 2023 
+    "MODE": "month",
+    "TARGET_MONTH": None,
+    # Base de Datos
+    "DB_HOST": os.getenv("DB_HOST", "localhost"),
+    "DB_NAME": os.getenv("DB_NAME", "tu_base_de_datos"),
+    "DB_USER": os.getenv("DB_USER", "root"),
+    "DB_PASSWORD": os.getenv("DB_PASSWORD", ""),
+    
+    # Credenciales y Archivos
+    "GA4_CREDENTIALS": os.getenv("GA4_CREDENTIALS_PATH"),
+    "TOKEN_FILE": os.getenv("TOKEN_FILE"),
+    
+    # IDs de Propiedades GA4
+    "PROP_ITAM": os.getenv("ITAM_GA4_PROPERTY_ID"),
+    "PROP_BLOG": os.getenv("ITAM_BLOG_GA4_PROPERTY_ID"),
+    "PROP_CARRERAS_NEW": os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_NEW"),
+    "PROP_CARRERAS_OLD": os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD"),
+    
+    # Fecha de corte para cambio de propiedad
+    "FECHA_NUEVA_INSTALACION": '2024-10-01'
 }
 
-# ==========================================
-#          FIN DE CONFIGURACIÓN
-# ==========================================
-
-# Mapeo de IDs de Base de Datos
-METRICS_MAP = {
-    "itam.mx":          {"totalUsers": 1, "views": 2, "viewsPerSession": 3},
-    "blog.itam.mx":     {"totalUsers": 4, "views": 5, "viewsPerSession": 6},
-    "carreras.itam.mx": {"totalUsers": 7, "views": 8, "viewsPerSession": 9},
-    "youtube":          {"ads": 10, "organic": 11, "total": 12}
+METRICS_ID_MAP = {
+    "itam_users": 1, "itam_views": 2, "itam_views_per_session": 3,
+    "blog_users": 4, "blog_views": 5, "blog_views_per_session": 6,
+    "carreras_users": 7, "carreras_views": 8, "carreras_views_per_session": 9,
+    "youtube_ads": 10, "youtube_organic": 11, "youtube_total": 12
 }
-
-FECHA_CAMBIO_GA4 = '2024-10-01'
 
 class MetricsETL:
     def __init__(self):
-        self.db_config = {
-            'host': os.getenv("DB_HOST", "localhost"),
-            'database': os.getenv("DB_NAME", "tu_base_de_datos"),
-            'user': os.getenv("DB_USER", "root"),
-            'password': os.getenv("DB_PASSWORD", ""),
-        }
-        self.ga4_client = self._init_ga4_client()
-        self.yt_client = self._init_yt_client()
+        self.conn = self.get_db_connection()
+        self.ga4_client = self.init_ga4()
+        self.yt_service = self.init_youtube()
 
-    def _init_ga4_client(self):
-        path = os.getenv("GA4_CREDENTIALS_PATH")
-        if not path: raise ValueError("Falta GA4_CREDENTIALS_PATH en .env")
+    def get_db_connection(self):
+        try:
+            return mysql.connector.connect(
+                host=CONFIG["DB_HOST"],
+                database=CONFIG["DB_NAME"],
+                user=CONFIG["DB_USER"],
+                password=CONFIG["DB_PASSWORD"]
+            )
+        except Error as e:
+            print(f"❌ Error conectando a MySQL: {e}")
+            return None
+
+    def init_ga4(self):
+        if not CONFIG["GA4_CREDENTIALS"]:
+            print("⚠️ Faltan credenciales GA4 en .env")
+            return None
         creds = service_account.Credentials.from_service_account_file(
-            path, scopes=["https://www.googleapis.com/auth/analytics.readonly"]
+            CONFIG["GA4_CREDENTIALS"],
+            scopes=["https://www.googleapis.com/auth/analytics.readonly"]
         )
         return BetaAnalyticsDataClient(credentials=creds)
 
-    def _init_yt_client(self):
-        token_path = os.getenv("TOKEN_FILE")
-        if not token_path or not os.path.exists(token_path):
-            print("⚠️  Advertencia: No se encontró token de YouTube. Las métricas de YT serán 0.")
+    def init_youtube(self):
+        if not CONFIG["TOKEN_FILE"] or not os.path.exists(CONFIG["TOKEN_FILE"]):
+            print("⚠️ No se encontró TOKEN_FILE para YouTube.")
             return None
+        
         creds = Credentials.from_authorized_user_file(
-            token_path, ["https://www.googleapis.com/auth/yt-analytics.readonly"]
+            CONFIG["TOKEN_FILE"], 
+            ["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/yt-analytics.readonly"]
         )
         return build("youtubeAnalytics", "v2", credentials=creds)
 
-    def get_date_range(self, year, month):
-        start_date = datetime.date(year, month, 1)
-        if month == 12:
-            end_date = datetime.date(year, 12, 31)
-        else:
-            end_date = datetime.date(year, month + 1, 1) - datetime.timedelta(days=1)
-        return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+    def clean_month_data(self, year, month):
+        if not self.conn: return
+        cursor = self.conn.cursor()
+        query = "DELETE FROM comunicacion WHERE YEAR(fecha) = %s AND MONTH(fecha) = %s"
+        try:
+            cursor.execute(query, (year, month))
+            self.conn.commit()
+            print(f"🧹 Datos limpiados en BD para {year}-{month}")
+        except Error as err:
+            print(f"❌ Error borrando datos: {err}")
+        finally:
+            cursor.close()
 
-    def fetch_ga4(self, start_date, end_date):
-        data_points = []
+    # ==========================================
+    #      LÓGICA DE EXTRACCIÓN (FETCH)
+    # ==========================================
+    
+    def fetch_ga4_single_property(self, property_id, start_date, end_date, dimension_filter=None):
+        """Consulta genérica a GA4 para una propiedad dada."""
+        if not self.ga4_client or not property_id: return (0, 0, 0.0)
+
+        # Usamos types.X para todo, así evitamos el error de StringFilter
+        request = types.RunReportRequest(
+            property=f"properties/{property_id}",
+            date_ranges=[types.DateRange(start_date=start_date, end_date=end_date)],
+            metrics=[
+                types.Metric(name="totalUsers"),
+                types.Metric(name="screenPageViews"),
+                types.Metric(name="screenPageViewsPerSession")
+            ],
+            dimension_filter=dimension_filter
+        )
+
+        try:
+            response = self.ga4_client.run_report(request)
+            if not response.rows:
+                return (0, 0, 0.0)
+            
+            row = response.rows[0]
+            users = int(row.metric_values[0].value)
+            views = int(row.metric_values[1].value)
+            vps = round(float(row.metric_values[2].value), 2)
+            return (users, views, vps)
+            
+        except Exception as e:
+            print(f"🔥 Error GA4 (Prop ID {property_id}): {e}")
+            return (0, 0, 0.0)
+
+    def fetch_all_metrics(self, start_date, end_date):
+        print(f"   🔎 Consultando APIs de {start_date} a {end_date}...")
+
+        # 1. ITAM (General)
+        itam_u, itam_v, itam_vps = self.fetch_ga4_single_property(CONFIG["PROP_ITAM"], start_date, end_date)
+        print(f"      - GA4 ITAM: {itam_v} vistas")
+
+        # 2. BLOG
+        blog_u, blog_v, blog_vps = self.fetch_ga4_single_property(CONFIG["PROP_BLOG"], start_date, end_date)
+        print(f"      - GA4 Blog: {blog_v} vistas")
+
+        # 3. CARRERAS (Lógica Condicional Nueva vs Vieja)
+        carreras_id = None
+        carreras_filter = None
         
-        properties_config = {
-            'itam.mx': {'id': os.getenv("ITAM_GA4_PROPERTY_ID"), 'filter': None},
-            'blog.itam.mx': {'id': os.getenv("ITAM_BLOG_GA4_PROPERTY_ID"), 'filter': None}
+        # Comparación de strings de fecha YYYY-MM-DD funciona correctamente en Python
+        if end_date >= CONFIG["FECHA_NUEVA_INSTALACION"]:
+            carreras_id = CONFIG["PROP_CARRERAS_NEW"]
+            # print("      (Usando Propiedad Nueva Carreras)")
+        else:
+            carreras_id = CONFIG["PROP_CARRERAS_OLD"]
+            print("      (Usando Propiedad Antigua Carreras con Filtro)")
+            
+            # Filtro Hostname exacto "aspirantes.itam.mx"
+            # SOLUCIÓN DEL ERROR: Usamos types.Filter.StringFilter (Anidado)
+            carreras_filter = types.FilterExpression(
+                filter=types.Filter(
+                    field_name="hostName",
+                    string_filter=types.Filter.StringFilter(
+                        match_type=types.Filter.StringFilter.MatchType.EXACT,
+                        value="aspirantes.itam.mx"
+                    )
+                )
+            )
+
+        carr_u, carr_v, carr_vps = self.fetch_ga4_single_property(carreras_id, start_date, end_date, carreras_filter)
+        print(f"      - GA4 Carreras: {carr_v} vistas")
+
+        # 4. YOUTUBE
+        yt_ads, yt_org, yt_tot = (0, 0, 0)
+        if self.yt_service:
+            try:
+                response = self.yt_service.reports().query(
+                    ids="channel==MINE",
+                    startDate=start_date,
+                    endDate=end_date,
+                    metrics="views",
+                    dimensions="insightTrafficSourceType"
+                ).execute()
+                
+                rows = response.get('rows', [])
+                for row in rows:
+                    source, views = row[0], int(row[1])
+                    yt_tot += views
+                    if source == 'ADVERTISING':
+                        yt_ads += views
+                
+                yt_org = yt_tot - yt_ads
+                print(f"      - YouTube: {yt_tot} vistas ({yt_ads} Ads)")
+            except Exception as e:
+                print(f"🔥 Error YouTube: {e}")
+
+        return {
+            "itam_users": itam_u, "itam_views": itam_v, "itam_views_per_session": itam_vps,
+            "blog_users": blog_u, "blog_views": blog_v, "blog_views_per_session": blog_vps,
+            "carreras_users": carr_u, "carreras_views": carr_v, "carreras_views_per_session": carr_vps,
+            "youtube_ads": yt_ads, "youtube_organic": yt_org, "youtube_total": yt_tot
         }
 
-        # Lógica de cambio de propiedad Carreras
-        if start_date >= FECHA_CAMBIO_GA4:
-            properties_config['carreras.itam.mx'] = {
-                'id': os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_NEW"),
-                'filter': None
-            }
-        else:
-            filtr = FilterExpression(
-                filter=Filter(field_name="hostName", string_filter=Filter.StringFilter(value="aspirantes.itam.mx"))
-            )
-            properties_config['carreras.itam.mx'] = {
-                'id': os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD"),
-                'filter': filtr
-            }
-
-        for name, config in properties_config.items():
-            if not config['id']: continue
-            
-            req = RunReportRequest(
-                property=f"properties/{config['id']}",
-                metrics=[Metric(name="totalUsers"), Metric(name="screenPageViews"), Metric(name="screenPageViewsPerSession")],
-                date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
-                dimension_filter=config['filter']
-            )
-
+    def insert_metrics(self, metrics_dict, date_ref):
+        if not self.conn: return
+        cursor = self.conn.cursor()
+        sql = "INSERT INTO comunicacion (fecha, metrica, valor) VALUES (%s, %s, %s)"
+        data_to_insert = []
+        
+        for key, val in metrics_dict.items():
+            mid = METRICS_ID_MAP.get(key)
+            if mid: data_to_insert.append((date_ref, mid, val))
+        
+        if data_to_insert:
             try:
-                resp = self.ga4_client.run_report(req)
-                if resp.rows:
-                    row = resp.rows[0]
-                    vals = {
-                        "totalUsers": int(row.metric_values[0].value),
-                        "views": int(row.metric_values[1].value),
-                        "viewsPerSession": round(float(row.metric_values[2].value), 2)
-                    }
-                    for key, val in vals.items():
-                        metric_id = METRICS_MAP[name][key]
-                        data_points.append((end_date, metric_id, val))
-            except Exception as e:
-                print(f"❌ Error GA4 en {name}: {e}")
+                cursor.executemany(sql, data_to_insert)
+                self.conn.commit()
+                print(f"💾 Guardadas {len(data_to_insert)} métricas en BD para {date_ref}.")
+            except Error as e:
+                print(f"❌ Error Insert DB: {e}")
+        cursor.close()
+
+    def process_month(self, year, month):
+        start_date = datetime.date(year, month, 1)
+        last_day = calendar.monthrange(year, month)[1]
         
-        return data_points
-
-    def fetch_youtube(self, start_date, end_date):
-        data_points = []
-        if not self.yt_client: return []
-
-        try:
-            resp = self.yt_client.reports().query(
-                ids="channel==MINE",
-                startDate=start_date,
-                endDate=end_date,
-                metrics="views",
-                dimensions="insightTrafficSourceType"
-            ).execute()
-
-            ad_views = 0
-            total_views = 0
-
-            if "rows" in resp:
-                for row in resp["rows"]:
-                    source, views = row[0], int(row[1])
-                    total_views += views
-                    if source == 'ADVERTISING':
-                        ad_views += views
-            
-            organic_views = total_views - ad_views
-
-            data_points.append((end_date, METRICS_MAP['youtube']['ads'], ad_views))
-            data_points.append((end_date, METRICS_MAP['youtube']['organic'], organic_views))
-            data_points.append((end_date, METRICS_MAP['youtube']['total'], total_views))
-
-        except Exception as e:
-            print(f"❌ Error YouTube: {e}")
-        
-        return data_points
-
-    def save_to_db(self, data, mode='soft'):
-        if not data:
-            print("⚠️  No hay datos para guardar.")
-            return
-
-        # soft = INSERT IGNORE (solo llena huecos)
-        # hard = REPLACE INTO (sobrescribe todo)
-        query_type = "INSERT IGNORE" if mode == 'soft' else "REPLACE"
-        sql = f"{query_type} INTO comunicacion (fecha, metrica, valor) VALUES (%s, %s, %s)"
-
-        try:
-            conn = mysql.connector.connect(**self.db_config)
-            cursor = conn.cursor()
-            cursor.executemany(sql, data)
-            conn.commit()
-            print(f"✅ DB: {cursor.rowcount} registros procesados ({mode}).")
-
-        except Error as e:
-            print(f"🔥 Error de Base de Datos: {e}")
-        finally:
-            if 'conn' in locals() and conn.is_connected():
-                cursor.close()
-                conn.close()
-
-    def process_month(self, year, month, mode):
-        start, end = self.get_date_range(year, month)
-        print(f"🔄 Procesando periodo: {start} al {end} ...")
-        
-        ga_data = self.fetch_ga4(start, end)
-        yt_data = self.fetch_youtube(start, end)
-        
-        full_data = ga_data + yt_data
-        self.save_to_db(full_data, mode)
-
-    def run_historical(self, start_year, mode):
         today = datetime.date.today()
-        print(f"🚀 Iniciando carga histórica desde {start_year} (Modo: {mode})")
+        # Ajuste para mes parcial (Actual) o cerrado
+        if start_date.year == today.year and start_date.month == today.month:
+            end_date_obj = today 
+            print(f"⚠️ Procesando MES ACTUAL (Parcial): {start_date} al {end_date_obj}")
+        else:
+            end_date_obj = datetime.date(year, month, last_day) 
+            print(f"📅 Procesando Mes Cerrado: {start_date} al {end_date_obj}")
+
+        # Limpiar
+        self.clean_month_data(year, month)
         
-        for year in range(start_year, today.year + 1):
-            start_month = 1
-            end_month = 12
-            
-            if year == today.year:
-                end_month = today.month - 1 
-            
-            # Si estamos en enero, el loop anterior no corre para el año actual, ajustamos
-            if end_month < 1: 
-                continue
-
-            for month in range(start_month, end_month + 1):
-                self.process_month(year, month, mode)
-
-# ==========================================
-#           EJECUCIÓN PRINCIPAL
-# ==========================================
+        # Fetch
+        s_str = start_date.strftime('%Y-%m-%d')
+        e_str = end_date_obj.strftime('%Y-%m-%d')
+        metrics = self.fetch_all_metrics(s_str, e_str)
+        
+        # Insertar
+        self.insert_metrics(metrics, end_date_obj)
+        print("✅ Listo.\n")
 
 if __name__ == "__main__":
     etl = MetricsETL()
-    mode = CONFIG["MODE"]
-
-    if mode == 'month':
-        target = CONFIG["TARGET_MONTH"]
-        
-        if target:
-            # Caso 1: Mes específico definido por usuario
-            year, month = map(int, target.split('-'))
-            print(f"📅 Modo Mensual Manual: {target}")
-            etl.process_month(year, month, mode='hard') # Siempre hard para actualizaciones manuales
-            
-        else:
-            # Caso 2: Automático (Mes anterior)
-            today = datetime.date.today()
-            first_day_this_month = today.replace(day=1)
-            prev_month_date = first_day_this_month - datetime.timedelta(days=1)
-            
-            print(f"📅 Modo Mensual Automático: {prev_month_date.strftime('%Y-%m')}")
-            etl.process_month(prev_month_date.year, prev_month_date.month, mode='hard')
-
-    elif mode in ['soft_reset', 'hard_reset']:
-        # Caso 3: Cargas históricas
-        # soft_reset -> 'soft' para INSERT IGNORE
-        # hard_reset -> 'hard' para REPLACE INTO
-        db_mode = 'soft' if mode == 'soft_reset' else 'hard'
-        etl.run_historical(CONFIG["START_YEAR"], db_mode)
-
-    else:
-        print(f"❌ Error: El modo '{mode}' no es válido en la configuración.")
+    today = datetime.date.today()
+    
+    # 1. Mes Anterior
+    first = today.replace(day=1)
+    prev = first - datetime.timedelta(days=1)
+    print(f"--- 1. Ejecutando Mes Anterior ({prev.strftime('%Y-%m')}) ---")
+    etl.process_month(prev.year, prev.month)
+    
+    # 2. Mes Actual
+    print(f"--- 2. Ejecutando Mes Actual ({today.strftime('%Y-%m')}) ---")
+    etl.process_month(today.year, today.month)
