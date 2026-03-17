@@ -6,3 +6,5 @@ credentials/
 __pycache__/
 metricasgavenv/
 historical/
+*.xlsx
+*.csv

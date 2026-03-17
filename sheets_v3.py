@@ -3,7 +3,7 @@ import datetime
 import dotenv
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine # <--- CAMBIO IMPORTANTE
+from sqlalchemy import create_engine
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -35,15 +35,12 @@ METRICS_MAP = {
 
 class SheetsUpdater:
     def __init__(self):
-        # Crear Engine de SQLAlchemy para evitar el warning de Pandas
         user = os.getenv("DB_USER", "root")
         password = os.getenv("DB_PASSWORD", "")
         host = os.getenv("DB_HOST", "localhost")
         db_name = os.getenv("DB_NAME", "tu_base_de_datos")
         
-        # String de conexión: mysql+mysqlconnector://user:pass@host/db
         self.db_engine = create_engine(f'mysql+mysqlconnector://{user}:{password}@{host}/{db_name}')
-        
         self.sheets_client = self._init_sheets_client()
 
     def _init_sheets_client(self):
@@ -59,7 +56,6 @@ class SheetsUpdater:
         query = "SELECT fecha, metrica, valor FROM comunicacion ORDER BY fecha ASC"
         
         try:
-            # Usamos self.db_engine con SQLAlchemy
             with self.db_engine.connect() as conn:
                 df = pd.read_sql(query, conn)
             
@@ -78,25 +74,31 @@ class SheetsUpdater:
 
     def calculate_metrics(self, df):
         if df.empty: return df
-        print("🧮 Calculando métricas avanzadas (YTD, YoY)...")
+        print("🧮 Calculando métricas avanzadas (YTD, YoY, Previous FY)...")
         df = df.sort_values(by=['Metric', 'Date'])
         
-        # Año Fiscal (Agosto)
+        # 1. Año Fiscal (Agosto a Julio)
         df['fiscal_group'] = np.where(df['Date'].dt.month >= 8, df['Date'].dt.year, df['Date'].dt.year - 1)
-        df['ytd'] = df.groupby(['Metric', 'fiscal_group'])['Value'].cumsum()
+        
+        # 2. YTD (Corregido para manejar Promedios Acumulados)
+        # Calculamos la suma acumulada y el número de meses transcurridos en el año fiscal
+        df['ytd_sum'] = df.groupby(['Metric', 'fiscal_group'])['Value'].cumsum()
+        df['cum_count'] = df.groupby(['Metric', 'fiscal_group']).cumcount() + 1
+        df['ytd_mean'] = df['ytd_sum'] / df['cum_count']
+        
+        # Si la métrica es "Views Per Session", usamos la media acumulada; si no, la suma
+        df['ytd'] = np.where(
+            df['Metric'].str.contains('Views Per Session'),
+            df['ytd_mean'],
+            df['ytd_sum']
+        )
+        df['ytd'] = df['ytd'].round(2) # Redondear YTD a 2 decimales
+        df.drop(columns=['ytd_sum', 'cum_count', 'ytd_mean'], inplace=True)
 
-        # YoY (Join consigo mismo hace 1 año)
+        # 3. YoY
         df['Date_Target'] = df['Date'] + pd.DateOffset(years=1)
-        # Ajuste para evitar error de merge con columnas duplicadas
         df_shifted = df[['Date', 'Metric', 'Value', 'ytd']].copy()
-        df_shifted.rename(columns={'Date': 'Date_Prev'}, inplace=True) # Renombrar para claridad
-        
-        # Hacemos el merge usando Date_Target del original vs Date real del shifted
-        # Queremos buscar: "Para la fecha X (df), dame el valor de la fecha X-1año (df_shifted)"
-        # Entonces: df.Date == df_shifted.Date_Target no es correcto.
-        # Es: df.Date (actual) == (df_shifted.Date_Prev + 1 año)
-        # O más fácil: Creamos una columna en el DF original "Date_Last_Year"
-        
+        df_shifted.rename(columns={'Date': 'Date_Prev'}, inplace=True) 
         df['Date_Last_Year'] = df['Date'] - pd.DateOffset(years=1)
         
         df_final = pd.merge(
@@ -109,7 +111,28 @@ class SheetsUpdater:
         )
         
         df_final.rename(columns={'Value_prev': 'year_over_year', 'ytd_prev': 'ytd_over_year'}, inplace=True)
-        cols = ['Date', 'Metric', 'Value', 'ytd', 'year_over_year', 'ytd_over_year']
+        df_final['ytd_over_year'] = df_final['ytd_over_year'].round(2) # Redondear YoY de YTD
+
+        # 4. Cálculo del Año Fiscal Anterior Completo
+        fy_agg = df.groupby(['fiscal_group', 'Metric'])['Value'].agg(['sum', 'mean']).reset_index()
+        
+        fy_agg['Previous_FY_Value'] = np.where(
+            fy_agg['Metric'].str.contains('Views Per Session'), 
+            fy_agg['mean'], 
+            fy_agg['sum']
+        )
+        fy_agg['Previous_FY_Value'] = fy_agg['Previous_FY_Value'].round(2) # Redondear FY Previo
+        
+        fy_agg['fiscal_group'] = fy_agg['fiscal_group'] + 1
+        
+        df_final = pd.merge(
+            df_final,
+            fy_agg[['fiscal_group', 'Metric', 'Previous_FY_Value']],
+            on=['fiscal_group', 'Metric'],
+            how='left'
+        )
+
+        cols = ['Date', 'Metric', 'Value', 'ytd', 'year_over_year', 'ytd_over_year', 'Previous_FY_Value']
         return df_final[cols].fillna(0)
 
     def upload_to_sheet(self, df, sheet_name):
@@ -170,9 +193,7 @@ class SheetsUpdater:
             (processed_data['Date'].dt.month == current_month_date.month)
         ].copy()
         
-        # Para current month, solo subimos crudos (sin YTD) o con YTD si quieres.
-        # Aquí subo solo crudos como pediste originalmente, si quieres todo, quita la selección de columnas.
-        cols_current = ['Date', 'Metric', 'Value'] 
+        cols_current = ['Date', 'Metric', 'Value', 'Previous_FY_Value'] 
         self.upload_to_sheet(current_df[cols_current], CONFIG["TAB_CURRENT"])
 
 if __name__ == "__main__":
