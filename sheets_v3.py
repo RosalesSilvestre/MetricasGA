@@ -18,21 +18,6 @@ CONFIG = {
     "MANUAL_TARGET_MONTH": "2025-12",
 }
 
-METRICS_MAP = {
-    1: "ITAM Total Users",
-    2: "ITAM Views",
-    3: "ITAM Views Per Session",
-    4: "Blog Total Users",
-    5: "Blog Views",
-    6: "Blog Views Per Session",
-    7: "Carreras Total Users",
-    8: "Carreras Views",
-    9: "Carreras Views Per Session",
-    10: "YouTube Advertisement Views",
-    11: "YouTube Organic Views",
-    12: "YouTube Total Views"
-}
-
 class SheetsUpdater:
     def __init__(self):
         user = os.getenv("DB_USER", "root")
@@ -52,8 +37,14 @@ class SheetsUpdater:
         return build('sheets', 'v4', credentials=creds)
 
     def get_db_data(self):
-        print("📥 Descargando histórico desde SQL...")
-        query = "SELECT fecha, metrica, valor FROM comunicacion ORDER BY fecha ASC"
+        print("📥 Descargando histórico usando JOIN con el glosario...")
+        # Aprovechamos la arquitectura estrella para obtener el nombre directamente
+        query = """
+            SELECT c.fecha AS Date, g.nombre AS Metric, c.valor AS Value 
+            FROM comunicacion c
+            JOIN glosario_comunicacion g ON c.metrica = g.metrica
+            ORDER BY c.fecha ASC
+        """
         
         try:
             with self.db_engine.connect() as conn:
@@ -63,9 +54,7 @@ class SheetsUpdater:
                 print("⚠️ La base de datos está vacía.")
                 return pd.DataFrame()
 
-            df.columns = ['Date', 'Metric', 'Value']
             df['Date'] = pd.to_datetime(df['Date'])
-            df['Metric'] = df['Metric'].map(METRICS_MAP)
             df.dropna(subset=['Metric'], inplace=True)
             return df
         except Exception as e:
@@ -77,25 +66,21 @@ class SheetsUpdater:
         print("🧮 Calculando métricas avanzadas (YTD, YoY, Previous FY)...")
         df = df.sort_values(by=['Metric', 'Date'])
         
-        # 1. Año Fiscal (Agosto a Julio)
         df['fiscal_group'] = np.where(df['Date'].dt.month >= 8, df['Date'].dt.year, df['Date'].dt.year - 1)
         
-        # 2. YTD (Corregido para manejar Promedios Acumulados)
-        # Calculamos la suma acumulada y el número de meses transcurridos en el año fiscal
         df['ytd_sum'] = df.groupby(['Metric', 'fiscal_group'])['Value'].cumsum()
         df['cum_count'] = df.groupby(['Metric', 'fiscal_group']).cumcount() + 1
         df['ytd_mean'] = df['ytd_sum'] / df['cum_count']
         
-        # Si la métrica es "Views Per Session", usamos la media acumulada; si no, la suma
+        # Identificamos si es promedio basándonos en si el nombre de la métrica contiene 'Session'
         df['ytd'] = np.where(
-            df['Metric'].str.contains('Views Per Session'),
+            df['Metric'].str.contains('Session'),
             df['ytd_mean'],
             df['ytd_sum']
         )
-        df['ytd'] = df['ytd'].round(2) # Redondear YTD a 2 decimales
+        df['ytd'] = df['ytd'].round(2)
         df.drop(columns=['ytd_sum', 'cum_count', 'ytd_mean'], inplace=True)
 
-        # 3. YoY
         df['Date_Target'] = df['Date'] + pd.DateOffset(years=1)
         df_shifted = df[['Date', 'Metric', 'Value', 'ytd']].copy()
         df_shifted.rename(columns={'Date': 'Date_Prev'}, inplace=True) 
@@ -111,18 +96,16 @@ class SheetsUpdater:
         )
         
         df_final.rename(columns={'Value_prev': 'year_over_year', 'ytd_prev': 'ytd_over_year'}, inplace=True)
-        df_final['ytd_over_year'] = df_final['ytd_over_year'].round(2) # Redondear YoY de YTD
+        df_final['ytd_over_year'] = df_final['ytd_over_year'].round(2)
 
-        # 4. Cálculo del Año Fiscal Anterior Completo
         fy_agg = df.groupby(['fiscal_group', 'Metric'])['Value'].agg(['sum', 'mean']).reset_index()
         
         fy_agg['Previous_FY_Value'] = np.where(
-            fy_agg['Metric'].str.contains('Views Per Session'), 
+            fy_agg['Metric'].str.contains('Session'), 
             fy_agg['mean'], 
             fy_agg['sum']
         )
-        fy_agg['Previous_FY_Value'] = fy_agg['Previous_FY_Value'].round(2) # Redondear FY Previo
-        
+        fy_agg['Previous_FY_Value'] = fy_agg['Previous_FY_Value'].round(2)
         fy_agg['fiscal_group'] = fy_agg['fiscal_group'] + 1
         
         df_final = pd.merge(
@@ -176,18 +159,14 @@ class SheetsUpdater:
         full_data = self.get_db_data()
         processed_data = self.calculate_metrics(full_data)
 
-        if processed_data.empty:
-            print("❌ No se pudo procesar la información.")
-            return
+        if processed_data.empty: return
 
-        # Filtrar Analytics (Mes cerrado)
         analytics_df = processed_data[
             (processed_data['Date'].dt.year == prev_month_date.year) & 
             (processed_data['Date'].dt.month == prev_month_date.month)
         ].copy()
         self.upload_to_sheet(analytics_df, CONFIG["TAB_ANALYTICS"])
 
-        # Filtrar Current Month (Mes actual)
         current_df = processed_data[
             (processed_data['Date'].dt.year == current_month_date.year) & 
             (processed_data['Date'].dt.month == current_month_date.month)

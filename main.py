@@ -8,50 +8,48 @@ from mysql.connector import Error
 # Google Libraries
 from google.oauth2 import service_account
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
-# IMPORTANTE: Importamos todo el módulo de tipos para evitar errores de importación individual
 from google.analytics.data_v1beta import types 
 from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials # Necesario para YouTube
+from google.oauth2.credentials import Credentials 
 
 dotenv.load_dotenv()
-
-# ==========================================
-#      CONFIGURACIÓN
-# ==========================================
 
 CONFIG = {
     "MODE": "month",
     "TARGET_MONTH": None,
-    # Base de Datos
     "DB_HOST": os.getenv("DB_HOST", "localhost"),
     "DB_NAME": os.getenv("DB_NAME", "tu_base_de_datos"),
     "DB_USER": os.getenv("DB_USER", "root"),
     "DB_PASSWORD": os.getenv("DB_PASSWORD", ""),
-    
-    # Credenciales y Archivos
     "GA4_CREDENTIALS": os.getenv("GA4_CREDENTIALS_PATH"),
     "TOKEN_FILE": os.getenv("TOKEN_FILE"),
-    
-    # IDs de Propiedades GA4
     "PROP_ITAM": os.getenv("ITAM_GA4_PROPERTY_ID"),
     "PROP_BLOG": os.getenv("ITAM_BLOG_GA4_PROPERTY_ID"),
     "PROP_CARRERAS_NEW": os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_NEW"),
     "PROP_CARRERAS_OLD": os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD"),
-    
-    # Fecha de corte para cambio de propiedad
     "FECHA_NUEVA_INSTALACION": '2024-10-01'
 }
 
-METRICS_ID_MAP = {
-    "itam_users": 1, "itam_views": 2, "itam_views_per_session": 3,
-    "blog_users": 4, "blog_views": 5, "blog_views_per_session": 6,
-    "carreras_users": 7, "carreras_views": 8, "carreras_views_per_session": 9,
-    "youtube_ads": 10, "youtube_organic": 11, "youtube_total": 12
+# Puente entre el código Python y el nombre oficial en la BD
+API_TO_DB_NAME = {
+    "itam_users": "ITAM Total Users",
+    "itam_views": "ITAM Views", 
+    "itam_views_per_session": "ITAM Views Per Session",
+    "blog_users": "Blog Total Users", 
+    "blog_views": "Blog Views", 
+    "blog_views_per_session": "Blog Views Per Session",
+    "carreras_users": "Carreras Total Users", 
+    "carreras_views": "Carreras Views", 
+    "carreras_views_per_session": "Carreras Views Per Session",
+    "youtube_ads": "YouTube Advertisement Views", 
+    "youtube_organic": "YouTube Organic Views", 
+    "youtube_total": "YouTube Total Views"
 }
 
 class MetricsETL:
     def __init__(self):
         self.conn = self.get_db_connection()
+        self.metrics_id_map = self.load_metrics_glosary()
         self.ga4_client = self.init_ga4()
         self.yt_service = self.init_youtube()
 
@@ -67,33 +65,53 @@ class MetricsETL:
             print(f"❌ Error conectando a MySQL: {e}")
             return None
 
+    def load_metrics_glosary(self):
+        """Carga los IDs desde la tabla glosario_comunicacion"""
+        if not self.conn: return {}
+        cursor = self.conn.cursor(dictionary=True)
+        try:
+            cursor.execute("SELECT metrica, nombre FROM glosario_comunicacion")
+            glosario_db = {row['nombre']: row['metrica'] for row in cursor.fetchall()}
+            
+            # Construimos el mapa dinámico: "itam_users" -> ID de la BD
+            dynamic_map = {}
+            for api_key, db_name in API_TO_DB_NAME.items():
+                if db_name in glosario_db:
+                    dynamic_map[api_key] = glosario_db[db_name]
+                else:
+                    print(f"⚠️ Métrica '{db_name}' no encontrada en el glosario_comunicacion.")
+            return dynamic_map
+        except Error as e:
+            print(f"❌ Error leyendo glosario: {e}")
+            return {}
+        finally:
+            cursor.close()
+
     def init_ga4(self):
-        if not CONFIG["GA4_CREDENTIALS"]:
-            print("⚠️ Faltan credenciales GA4 en .env")
-            return None
+        if not CONFIG["GA4_CREDENTIALS"]: return None
         creds = service_account.Credentials.from_service_account_file(
-            CONFIG["GA4_CREDENTIALS"],
-            scopes=["https://www.googleapis.com/auth/analytics.readonly"]
+            CONFIG["GA4_CREDENTIALS"], scopes=["https://www.googleapis.com/auth/analytics.readonly"]
         )
         return BetaAnalyticsDataClient(credentials=creds)
 
     def init_youtube(self):
-        if not CONFIG["TOKEN_FILE"] or not os.path.exists(CONFIG["TOKEN_FILE"]):
-            print("⚠️ No se encontró TOKEN_FILE para YouTube.")
-            return None
-        
+        if not CONFIG["TOKEN_FILE"] or not os.path.exists(CONFIG["TOKEN_FILE"]): return None
         creds = Credentials.from_authorized_user_file(
-            CONFIG["TOKEN_FILE"], 
-            ["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/yt-analytics.readonly"]
+            CONFIG["TOKEN_FILE"], ["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/yt-analytics.readonly"]
         )
         return build("youtubeAnalytics", "v2", credentials=creds)
 
     def clean_month_data(self, year, month):
         if not self.conn: return
         cursor = self.conn.cursor()
-        query = "DELETE FROM comunicacion WHERE YEAR(fecha) = %s AND MONTH(fecha) = %s"
+        # Solo limpia las métricas que este script maneja (evitamos borrar las de medios accidentalmente)
+        ids_to_clean = tuple(self.metrics_id_map.values())
+        if not ids_to_clean: return
+        
+        format_strings = ','.join(['%s'] * len(ids_to_clean))
+        query = f"DELETE FROM comunicacion WHERE YEAR(fecha) = %s AND MONTH(fecha) = %s AND metrica IN ({format_strings})"
         try:
-            cursor.execute(query, (year, month))
+            cursor.execute(query, (year, month, *ids_to_clean))
             self.conn.commit()
             print(f"🧹 Datos limpiados en BD para {year}-{month}")
         except Error as err:
@@ -101,15 +119,8 @@ class MetricsETL:
         finally:
             cursor.close()
 
-    # ==========================================
-    #      LÓGICA DE EXTRACCIÓN (FETCH)
-    # ==========================================
-    
     def fetch_ga4_single_property(self, property_id, start_date, end_date, dimension_filter=None):
-        """Consulta genérica a GA4 para una propiedad dada."""
         if not self.ga4_client or not property_id: return (0, 0, 0.0)
-
-        # Usamos types.X para todo, así evitamos el error de StringFilter
         request = types.RunReportRequest(
             property=f"properties/{property_id}",
             date_ranges=[types.DateRange(start_date=start_date, end_date=end_date)],
@@ -120,81 +131,46 @@ class MetricsETL:
             ],
             dimension_filter=dimension_filter
         )
-
         try:
             response = self.ga4_client.run_report(request)
-            if not response.rows:
-                return (0, 0, 0.0)
-            
+            if not response.rows: return (0, 0, 0.0)
             row = response.rows[0]
-            users = int(row.metric_values[0].value)
-            views = int(row.metric_values[1].value)
-            vps = round(float(row.metric_values[2].value), 2)
-            return (users, views, vps)
-            
+            return (int(row.metric_values[0].value), int(row.metric_values[1].value), round(float(row.metric_values[2].value), 2))
         except Exception as e:
             print(f"🔥 Error GA4 (Prop ID {property_id}): {e}")
             return (0, 0, 0.0)
 
     def fetch_all_metrics(self, start_date, end_date):
         print(f"   🔎 Consultando APIs de {start_date} a {end_date}...")
-
-        # 1. ITAM (General)
         itam_u, itam_v, itam_vps = self.fetch_ga4_single_property(CONFIG["PROP_ITAM"], start_date, end_date)
-        print(f"      - GA4 ITAM: {itam_v} vistas")
-
-        # 2. BLOG
         blog_u, blog_v, blog_vps = self.fetch_ga4_single_property(CONFIG["PROP_BLOG"], start_date, end_date)
-        print(f"      - GA4 Blog: {blog_v} vistas")
 
-        # 3. CARRERAS (Lógica Condicional Nueva vs Vieja)
-        carreras_id = None
-        carreras_filter = None
-        
-        # Comparación de strings de fecha YYYY-MM-DD funciona correctamente en Python
+        carreras_id, carreras_filter = None, None
         if end_date >= CONFIG["FECHA_NUEVA_INSTALACION"]:
             carreras_id = CONFIG["PROP_CARRERAS_NEW"]
-            # print("      (Usando Propiedad Nueva Carreras)")
         else:
             carreras_id = CONFIG["PROP_CARRERAS_OLD"]
-            print("      (Usando Propiedad Antigua Carreras con Filtro)")
-            
-            # Filtro Hostname exacto "aspirantes.itam.mx"
-            # SOLUCIÓN DEL ERROR: Usamos types.Filter.StringFilter (Anidado)
             carreras_filter = types.FilterExpression(
                 filter=types.Filter(
                     field_name="hostName",
-                    string_filter=types.Filter.StringFilter(
-                        match_type=types.Filter.StringFilter.MatchType.EXACT,
-                        value="aspirantes.itam.mx"
-                    )
+                    string_filter=types.Filter.StringFilter(match_type=types.Filter.StringFilter.MatchType.EXACT, value="aspirantes.itam.mx")
                 )
             )
 
         carr_u, carr_v, carr_vps = self.fetch_ga4_single_property(carreras_id, start_date, end_date, carreras_filter)
-        print(f"      - GA4 Carreras: {carr_v} vistas")
 
-        # 4. YOUTUBE
         yt_ads, yt_org, yt_tot = (0, 0, 0)
         if self.yt_service:
             try:
                 response = self.yt_service.reports().query(
-                    ids="channel==MINE",
-                    startDate=start_date,
-                    endDate=end_date,
-                    metrics="views",
-                    dimensions="insightTrafficSourceType"
+                    ids="channel==MINE", startDate=start_date, endDate=end_date,
+                    metrics="views", dimensions="insightTrafficSourceType"
                 ).execute()
-                
-                rows = response.get('rows', [])
-                for row in rows:
-                    source, views = row[0], int(row[1])
+                for row in response.get('rows', []):
+                    views = int(row[1])
                     yt_tot += views
-                    if source == 'ADVERTISING':
-                        yt_ads += views
-                
+                    if row[0] == 'ADVERTISING': yt_ads += views
                 yt_org = yt_tot - yt_ads
-                print(f"      - YouTube: {yt_tot} vistas ({yt_ads} Ads)")
             except Exception as e:
                 print(f"🔥 Error YouTube: {e}")
 
@@ -212,7 +188,7 @@ class MetricsETL:
         data_to_insert = []
         
         for key, val in metrics_dict.items():
-            mid = METRICS_ID_MAP.get(key)
+            mid = self.metrics_id_map.get(key)
             if mid: data_to_insert.append((date_ref, mid, val))
         
         if data_to_insert:
@@ -227,25 +203,12 @@ class MetricsETL:
     def process_month(self, year, month):
         start_date = datetime.date(year, month, 1)
         last_day = calendar.monthrange(year, month)[1]
-        
         today = datetime.date.today()
-        # Ajuste para mes parcial (Actual) o cerrado
-        if start_date.year == today.year and start_date.month == today.month:
-            end_date_obj = today 
-            print(f"⚠️ Procesando MES ACTUAL (Parcial): {start_date} al {end_date_obj}")
-        else:
-            end_date_obj = datetime.date(year, month, last_day) 
-            print(f"📅 Procesando Mes Cerrado: {start_date} al {end_date_obj}")
-
-        # Limpiar
+        
+        end_date_obj = today if start_date.year == today.year and start_date.month == today.month else datetime.date(year, month, last_day) 
+        
         self.clean_month_data(year, month)
-        
-        # Fetch
-        s_str = start_date.strftime('%Y-%m-%d')
-        e_str = end_date_obj.strftime('%Y-%m-%d')
-        metrics = self.fetch_all_metrics(s_str, e_str)
-        
-        # Insertar
+        metrics = self.fetch_all_metrics(start_date.strftime('%Y-%m-%d'), end_date_obj.strftime('%Y-%m-%d'))
         self.insert_metrics(metrics, end_date_obj)
         print("✅ Listo.\n")
 
@@ -253,12 +216,10 @@ if __name__ == "__main__":
     etl = MetricsETL()
     today = datetime.date.today()
     
-    # 1. Mes Anterior
     first = today.replace(day=1)
     prev = first - datetime.timedelta(days=1)
     print(f"--- 1. Ejecutando Mes Anterior ({prev.strftime('%Y-%m')}) ---")
     etl.process_month(prev.year, prev.month)
     
-    # 2. Mes Actual
     print(f"--- 2. Ejecutando Mes Actual ({today.strftime('%Y-%m')}) ---")
     etl.process_month(today.year, today.month)
