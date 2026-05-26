@@ -38,7 +38,6 @@ class SheetsUpdater:
 
     def get_db_data(self):
         print("📥 Descargando histórico usando JOIN con el glosario...")
-        # Aprovechamos la arquitectura estrella para obtener el nombre directamente
         query = """
             SELECT c.fecha AS Date, g.nombre AS Metric, c.valor AS Value 
             FROM comunicacion c
@@ -66,13 +65,14 @@ class SheetsUpdater:
         print("🧮 Calculando métricas avanzadas (YTD, YoY, Previous FY)...")
         df = df.sort_values(by=['Metric', 'Date'])
         
-        df['fiscal_group'] = np.where(df['Date'].dt.month >= 8, df['Date'].dt.year, df['Date'].dt.year - 1)
+        # 1. Definir Año Fiscal Actual (Ej. Mar 2026 -> 2025, Ago 2024 -> 2024)
+        df['fiscal_year'] = np.where(df['Date'].dt.month >= 8, df['Date'].dt.year, df['Date'].dt.year - 1)
         
-        df['ytd_sum'] = df.groupby(['Metric', 'fiscal_group'])['Value'].cumsum()
-        df['cum_count'] = df.groupby(['Metric', 'fiscal_group']).cumcount() + 1
+        # --- Cálculo de YTD ---
+        df['ytd_sum'] = df.groupby(['Metric', 'fiscal_year'])['Value'].cumsum()
+        df['cum_count'] = df.groupby(['Metric', 'fiscal_year']).cumcount() + 1
         df['ytd_mean'] = df['ytd_sum'] / df['cum_count']
         
-        # Identificamos si es promedio basándonos en si el nombre de la métrica contiene 'Session'
         df['ytd'] = np.where(
             df['Metric'].str.contains('Session'),
             df['ytd_mean'],
@@ -81,24 +81,31 @@ class SheetsUpdater:
         df['ytd'] = df['ytd'].round(2)
         df.drop(columns=['ytd_sum', 'cum_count', 'ytd_mean'], inplace=True)
 
-        df['Date_Target'] = df['Date'] + pd.DateOffset(years=1)
+        # --- Cálculo de YoY (Mejorado para saltar problema de años bisiestos) ---
+        df['Month'] = df['Date'].dt.month
+        df['Year_Last'] = df['Date'].dt.year - 1
+        
         df_shifted = df[['Date', 'Metric', 'Value', 'ytd']].copy()
-        df_shifted.rename(columns={'Date': 'Date_Prev'}, inplace=True) 
-        df['Date_Last_Year'] = df['Date'] - pd.DateOffset(years=1)
+        df_shifted['Month_prev'] = df_shifted['Date'].dt.month
+        df_shifted['Year_prev'] = df_shifted['Date'].dt.year
+        df_shifted.rename(columns={'Value': 'year_over_year', 'ytd': 'ytd_over_year'}, inplace=True)
         
         df_final = pd.merge(
             df,
-            df_shifted[['Date_Prev', 'Metric', 'Value', 'ytd']],
-            left_on=['Date_Last_Year', 'Metric'],
-            right_on=['Date_Prev', 'Metric'],
-            how='left',
-            suffixes=('', '_prev')
+            df_shifted[['Metric', 'Month_prev', 'Year_prev', 'year_over_year', 'ytd_over_year']],
+            left_on=['Metric', 'Month', 'Year_Last'],
+            right_on=['Metric', 'Month_prev', 'Year_prev'],
+            how='left'
         )
-        
-        df_final.rename(columns={'Value_prev': 'year_over_year', 'ytd_prev': 'ytd_over_year'}, inplace=True)
-        df_final['ytd_over_year'] = df_final['ytd_over_year'].round(2)
+        df_final['year_over_year'] = df_final['year_over_year'].fillna(0)
+        df_final['ytd_over_year'] = df_final['ytd_over_year'].fillna(0).round(2)
 
-        fy_agg = df.groupby(['fiscal_group', 'Metric'])['Value'].agg(['sum', 'mean']).reset_index()
+        # --- Cálculo de Previous FY (Lógica explícita y fácil de leer) ---
+        # Definimos estrictamente cuál es el año fiscal pasado para cada fila
+        df_final['prev_fiscal_year'] = df_final['fiscal_year'] - 1
+        
+        # Agrupamos los datos crudos por su año fiscal real
+        fy_agg = df_final.groupby(['fiscal_year', 'Metric'])['Value'].agg(['sum', 'mean']).reset_index()
         
         fy_agg['Previous_FY_Value'] = np.where(
             fy_agg['Metric'].str.contains('Session'), 
@@ -106,13 +113,15 @@ class SheetsUpdater:
             fy_agg['sum']
         )
         fy_agg['Previous_FY_Value'] = fy_agg['Previous_FY_Value'].round(2)
-        fy_agg['fiscal_group'] = fy_agg['fiscal_group'] + 1
         
+        # Cruzamos: el "prev_fiscal_year" de la fila actual con el "fiscal_year" agregado
         df_final = pd.merge(
             df_final,
-            fy_agg[['fiscal_group', 'Metric', 'Previous_FY_Value']],
-            on=['fiscal_group', 'Metric'],
-            how='left'
+            fy_agg[['fiscal_year', 'Metric', 'Previous_FY_Value']],
+            left_on=['prev_fiscal_year', 'Metric'],
+            right_on=['fiscal_year', 'Metric'],
+            how='left',
+            suffixes=('', '_agg')
         )
 
         cols = ['Date', 'Metric', 'Value', 'ytd', 'year_over_year', 'ytd_over_year', 'Previous_FY_Value']
