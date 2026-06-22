@@ -159,10 +159,10 @@ class MetricsETL:
             try:
                 response = self.yt_service.reports().query(
                     ids="channel==MINE", startDate=start_date, endDate=end_date,
-                    metrics="views", dimensions="insightTrafficSourceType"
+                    metrics="views", dimensions="insightTrafficSourceType,day"
                 ).execute()
                 for row in response.get('rows', []):
-                    views = int(row[1])
+                    views = int(row[2])
                     yt_tot += views
                     if row[0] == 'ADVERTISING': yt_ads += views
                 yt_org = yt_tot - yt_ads
@@ -218,7 +218,7 @@ if __name__ == "__main__":
     
     # --- CONFIGURACIÓN DE REPARACIÓN ---
     REPAIR_START_YEAR = 2026
-    REPAIR_START_MONTH = 1
+    REPAIR_START_MONTH = 4
     
     today = datetime.date.today()
     current_year = today.year
