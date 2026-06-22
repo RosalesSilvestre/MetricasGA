@@ -15,8 +15,6 @@ from google.oauth2.credentials import Credentials
 dotenv.load_dotenv()
 
 CONFIG = {
-    "MODE": "month",
-    "TARGET_MONTH": None,
     "DB_HOST": os.getenv("DB_HOST", "localhost"),
     "DB_NAME": os.getenv("DB_NAME", "tu_base_de_datos"),
     "DB_USER": os.getenv("DB_USER", "root"),
@@ -66,14 +64,12 @@ class MetricsETL:
             return None
 
     def load_metrics_glosary(self):
-        """Carga los IDs desde la tabla glosario_comunicacion"""
         if not self.conn: return {}
         cursor = self.conn.cursor(dictionary=True)
         try:
             cursor.execute("SELECT metrica, nombre FROM glosario_comunicacion")
             glosario_db = {row['nombre']: row['metrica'] for row in cursor.fetchall()}
             
-            # Construimos el mapa dinámico: "itam_users" -> ID de la BD
             dynamic_map = {}
             for api_key, db_name in API_TO_DB_NAME.items():
                 if db_name in glosario_db:
@@ -104,7 +100,6 @@ class MetricsETL:
     def clean_month_data(self, year, month):
         if not self.conn: return
         cursor = self.conn.cursor()
-        # Solo limpia las métricas que este script maneja (evitamos borrar las de medios accidentalmente)
         ids_to_clean = tuple(self.metrics_id_map.values())
         if not ids_to_clean: return
         
@@ -113,7 +108,7 @@ class MetricsETL:
         try:
             cursor.execute(query, (year, month, *ids_to_clean))
             self.conn.commit()
-            print(f"🧹 Datos limpiados en BD para {year}-{month}")
+            print(f"🧹 Datos limpiados en BD para {year}-{month:02d}")
         except Error as err:
             print(f"❌ Error borrando datos: {err}")
         finally:
@@ -164,10 +159,10 @@ class MetricsETL:
             try:
                 response = self.yt_service.reports().query(
                     ids="channel==MINE", startDate=start_date, endDate=end_date,
-                    metrics="views", dimensions="insightTrafficSourceType"
+                    metrics="views", dimensions="insightTrafficSourceType,day"
                 ).execute()
                 for row in response.get('rows', []):
-                    views = int(row[1])
+                    views = int(row[2])
                     yt_tot += views
                     if row[0] == 'ADVERTISING': yt_ads += views
                 yt_org = yt_tot - yt_ads
@@ -205,7 +200,13 @@ class MetricsETL:
         last_day = calendar.monthrange(year, month)[1]
         today = datetime.date.today()
         
-        end_date_obj = today if start_date.year == today.year and start_date.month == today.month else datetime.date(year, month, last_day) 
+        # Si el mes a procesar es el actual, cortamos en "today"
+        if start_date.year == today.year and start_date.month == today.month:
+            end_date_obj = today
+            print(f"⚠️ Procesando MES ACTUAL (Parcial): {start_date} al {end_date_obj}")
+        else:
+            end_date_obj = datetime.date(year, month, last_day) 
+            print(f"📅 Procesando Mes Cerrado: {start_date} al {end_date_obj}")
         
         self.clean_month_data(year, month)
         metrics = self.fetch_all_metrics(start_date.strftime('%Y-%m-%d'), end_date_obj.strftime('%Y-%m-%d'))
@@ -214,12 +215,28 @@ class MetricsETL:
 
 if __name__ == "__main__":
     etl = MetricsETL()
+    
+    # --- CONFIGURACIÓN DE REPARACIÓN ---
+    REPAIR_START_YEAR = 2026
+    REPAIR_START_MONTH = 4
+    
     today = datetime.date.today()
+    current_year = today.year
+    current_month = today.month
     
-    first = today.replace(day=1)
-    prev = first - datetime.timedelta(days=1)
-    print(f"--- 1. Ejecutando Mes Anterior ({prev.strftime('%Y-%m')}) ---")
-    etl.process_month(prev.year, prev.month)
+    year_iter = REPAIR_START_YEAR
+    month_iter = REPAIR_START_MONTH
     
-    print(f"--- 2. Ejecutando Mes Actual ({today.strftime('%Y-%m')}) ---")
-    etl.process_month(today.year, today.month)
+    print(f"🚀 Iniciando REPARACIÓN HISTÓRICA desde {year_iter}-{month_iter:02d} hasta {current_year}-{current_month:02d}...\n")
+    
+    while (year_iter < current_year) or (year_iter == current_year and month_iter <= current_month):
+        print(f"--- Ejecutando recuperación para {year_iter}-{month_iter:02d} ---")
+        etl.process_month(year_iter, month_iter)
+        
+        # Avanzamos al siguiente mes
+        month_iter += 1
+        if month_iter > 12:
+            month_iter = 1
+            year_iter += 1
+            
+    print("🎉 Reparación finalizada. Todos los meses han sido actualizados.")
