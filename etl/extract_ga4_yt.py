@@ -1,9 +1,17 @@
 import os
 import datetime
 import calendar
-import dotenv
-import mysql.connector
 from mysql.connector import Error
+
+import sys
+import os
+
+# Agrega la carpeta raíz del proyecto a las rutas del sistema para que encuentre 'config' y 'db'
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Importaciones centralizadas (Arquitectura nueva)
+from config.settings import CONFIG
+from db.database import get_mysql_connection
 
 # Google Libraries
 from google.oauth2 import service_account
@@ -11,24 +19,6 @@ from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta import types 
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials 
-
-dotenv.load_dotenv()
-
-CONFIG = {
-    "MODE": "month",
-    "TARGET_MONTH": None,
-    "DB_HOST": os.getenv("DB_HOST", "localhost"),
-    "DB_NAME": os.getenv("DB_NAME", "tu_base_de_datos"),
-    "DB_USER": os.getenv("DB_USER", "root"),
-    "DB_PASSWORD": os.getenv("DB_PASSWORD", ""),
-    "GA4_CREDENTIALS": os.getenv("GA4_CREDENTIALS_PATH"),
-    "TOKEN_FILE": os.getenv("TOKEN_FILE"),
-    "PROP_ITAM": os.getenv("ITAM_GA4_PROPERTY_ID"),
-    "PROP_BLOG": os.getenv("ITAM_BLOG_GA4_PROPERTY_ID"),
-    "PROP_CARRERAS_NEW": os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_NEW"),
-    "PROP_CARRERAS_OLD": os.getenv("ITAM_CARRERAS_GA4_PROPERTY_ID_OLD"),
-    "FECHA_NUEVA_INSTALACION": '2024-10-01'
-}
 
 # Puente entre el código Python y el nombre oficial en la BD
 API_TO_DB_NAME = {
@@ -48,22 +38,10 @@ API_TO_DB_NAME = {
 
 class MetricsETL:
     def __init__(self):
-        self.conn = self.get_db_connection()
+        self.conn = get_mysql_connection()
         self.metrics_id_map = self.load_metrics_glosary()
         self.ga4_client = self.init_ga4()
         self.yt_service = self.init_youtube()
-
-    def get_db_connection(self):
-        try:
-            return mysql.connector.connect(
-                host=CONFIG["DB_HOST"],
-                database=CONFIG["DB_NAME"],
-                user=CONFIG["DB_USER"],
-                password=CONFIG["DB_PASSWORD"]
-            )
-        except Error as e:
-            print(f"❌ Error conectando a MySQL: {e}")
-            return None
 
     def load_metrics_glosary(self):
         """Carga los IDs desde la tabla glosario_comunicacion"""
@@ -73,13 +51,12 @@ class MetricsETL:
             cursor.execute("SELECT metrica, nombre FROM glosario_comunicacion")
             glosario_db = {row['nombre']: row['metrica'] for row in cursor.fetchall()}
             
-            # Construimos el mapa dinámico: "itam_users" -> ID de la BD
             dynamic_map = {}
             for api_key, db_name in API_TO_DB_NAME.items():
                 if db_name in glosario_db:
                     dynamic_map[api_key] = glosario_db[db_name]
                 else:
-                    print(f"⚠️ Métrica '{db_name}' no encontrada en el glosario_comunicacion.")
+                    print(f"⚠️ Métrica '{db_name}' no encontrada en el glosario.")
             return dynamic_map
         except Error as e:
             print(f"❌ Error leyendo glosario: {e}")
@@ -88,23 +65,23 @@ class MetricsETL:
             cursor.close()
 
     def init_ga4(self):
-        if not CONFIG["GA4_CREDENTIALS"]: return None
+        if not CONFIG.get("GA4_CREDENTIALS"): return None
         creds = service_account.Credentials.from_service_account_file(
             CONFIG["GA4_CREDENTIALS"], scopes=["https://www.googleapis.com/auth/analytics.readonly"]
         )
         return BetaAnalyticsDataClient(credentials=creds)
 
     def init_youtube(self):
-        if not CONFIG["TOKEN_FILE"] or not os.path.exists(CONFIG["TOKEN_FILE"]): return None
+        token_path = CONFIG.get("TOKEN_FILE")
+        if not token_path or not os.path.exists(token_path): return None
         creds = Credentials.from_authorized_user_file(
-            CONFIG["TOKEN_FILE"], ["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/yt-analytics.readonly"]
+            token_path, ["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/yt-analytics.readonly"]
         )
         return build("youtubeAnalytics", "v2", credentials=creds)
 
     def clean_month_data(self, year, month):
         if not self.conn: return
         cursor = self.conn.cursor()
-        # Solo limpia las métricas que este script maneja (evitamos borrar las de medios accidentalmente)
         ids_to_clean = tuple(self.metrics_id_map.values())
         if not ids_to_clean: return
         
@@ -113,7 +90,7 @@ class MetricsETL:
         try:
             cursor.execute(query, (year, month, *ids_to_clean))
             self.conn.commit()
-            print(f"🧹 Datos limpiados en BD para {year}-{month}")
+            print(f"🧹 Datos limpiados en BD para {year}-{month:02d}")
         except Error as err:
             print(f"❌ Error borrando datos: {err}")
         finally:
@@ -146,7 +123,9 @@ class MetricsETL:
         blog_u, blog_v, blog_vps = self.fetch_ga4_single_property(CONFIG["PROP_BLOG"], start_date, end_date)
 
         carreras_id, carreras_filter = None, None
-        if end_date >= CONFIG["FECHA_NUEVA_INSTALACION"]:
+        fecha_nueva_instalacion = '2024-10-01'
+        
+        if end_date >= fecha_nueva_instalacion:
             carreras_id = CONFIG["PROP_CARRERAS_NEW"]
         else:
             carreras_id = CONFIG["PROP_CARRERAS_OLD"]
@@ -213,11 +192,13 @@ class MetricsETL:
         print("✅ Listo.\n")
 
 if __name__ == "__main__":
+    print("🚀 Iniciando extracción de GA4 y YouTube...")
     etl = MetricsETL()
     today = datetime.date.today()
     
     first = today.replace(day=1)
     prev = first - datetime.timedelta(days=1)
+    
     print(f"--- 1. Ejecutando Mes Anterior ({prev.strftime('%Y-%m')}) ---")
     etl.process_month(prev.year, prev.month)
     

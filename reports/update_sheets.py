@@ -1,17 +1,23 @@
 import os
 import datetime
-import dotenv
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine
+
+import sys
+import os
+
+# Agrega la carpeta raíz del proyecto a las rutas del sistema para que encuentre 'config' y 'db'
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Importaciones centralizadas
+from config.settings import CONFIG
+from db.database import get_sqlalchemy_engine
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-dotenv.load_dotenv()
-
-CONFIG = {
-    "SPREADSHEET_ID": os.getenv("GOOGLE_SHEET_ID"),
+REPORT_CONFIG = {
     "TAB_ANALYTICS": "Analytics",
     "TAB_CURRENT": "Current Month",
     "DATE_MODE": "auto", 
@@ -20,24 +26,22 @@ CONFIG = {
 
 class SheetsUpdater:
     def __init__(self):
-        user = os.getenv("DB_USER", "root")
-        password = os.getenv("DB_PASSWORD", "")
-        host = os.getenv("DB_HOST", "localhost")
-        db_name = os.getenv("DB_NAME", "tu_base_de_datos")
-        
-        self.db_engine = create_engine(f'mysql+mysqlconnector://{user}:{password}@{host}/{db_name}')
+        self.db_engine = get_sqlalchemy_engine()
         self.sheets_client = self._init_sheets_client()
 
     def _init_sheets_client(self):
-        path = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH")
-        if not path: raise ValueError("❌ Falta GOOGLE_SHEETS_CREDENTIALS_PATH")
+        path = CONFIG.get("GA4_CREDENTIALS")  # Asumiendo que usas la misma Service Account para Sheets
+        if not path: raise ValueError("❌ Falta GA4_CREDENTIALS_PATH en .env para autenticar Sheets")
         creds = service_account.Credentials.from_service_account_file(
             path, scopes=['https://www.googleapis.com/auth/spreadsheets']
         )
         return build('sheets', 'v4', credentials=creds)
 
     def get_db_data(self):
-        print("📥 Descargando histórico usando JOIN con el glosario...")
+        if not self.db_engine:
+            return pd.DataFrame()
+            
+        print("📥 Descargando histórico consolidado de MySQL...")
         query = """
             SELECT c.fecha AS Date, g.nombre AS Metric, c.valor AS Value 
             FROM comunicacion c
@@ -81,7 +85,7 @@ class SheetsUpdater:
         df['ytd'] = df['ytd'].round(2)
         df.drop(columns=['ytd_sum', 'cum_count', 'ytd_mean'], inplace=True)
 
-        # --- Cálculo de YoY (Mejorado para saltar problema de años bisiestos) ---
+        # --- Cálculo de YoY ---
         df['Month'] = df['Date'].dt.month
         df['Year_Last'] = df['Date'].dt.year - 1
         
@@ -100,11 +104,9 @@ class SheetsUpdater:
         df_final['year_over_year'] = df_final['year_over_year'].fillna(0)
         df_final['ytd_over_year'] = df_final['ytd_over_year'].fillna(0).round(2)
 
-        # --- Cálculo de Previous FY (Lógica explícita y fácil de leer) ---
-        # Definimos estrictamente cuál es el año fiscal pasado para cada fila
+        # --- Cálculo de Previous FY ---
         df_final['prev_fiscal_year'] = df_final['fiscal_year'] - 1
         
-        # Agrupamos los datos crudos por su año fiscal real
         fy_agg = df_final.groupby(['fiscal_year', 'Metric'])['Value'].agg(['sum', 'mean']).reset_index()
         
         fy_agg['Previous_FY_Value'] = np.where(
@@ -114,7 +116,6 @@ class SheetsUpdater:
         )
         fy_agg['Previous_FY_Value'] = fy_agg['Previous_FY_Value'].round(2)
         
-        # Cruzamos: el "prev_fiscal_year" de la fila actual con el "fiscal_year" agregado
         df_final = pd.merge(
             df_final,
             fy_agg[['fiscal_year', 'Metric', 'Previous_FY_Value']],
@@ -141,21 +142,21 @@ class SheetsUpdater:
         try:
             print(f"☁️ Subiendo {len(df_upload)} filas a '{sheet_name}'...")
             self.sheets_client.spreadsheets().values().clear(
-                spreadsheetId=CONFIG["SPREADSHEET_ID"], range=sheet_name
+                spreadsheetId=CONFIG["GOOGLE_SHEET_ID"], range=sheet_name
             ).execute()
             self.sheets_client.spreadsheets().values().update(
-                spreadsheetId=CONFIG["SPREADSHEET_ID"], range=f"{sheet_name}!A1",
+                spreadsheetId=CONFIG["GOOGLE_SHEET_ID"], range=f"{sheet_name}!A1",
                 valueInputOption="USER_ENTERED", body=body
             ).execute()
-            print(f"✅ {sheet_name} actualizada.")
+            print(f"✅ {sheet_name} actualizada correctamente.")
         except HttpError as e:
             print(f"❌ Error API Google: {e}")
 
     def run(self):
         today = datetime.date.today()
         
-        if CONFIG["DATE_MODE"] == "manual":
-            target_y, target_m = map(int, CONFIG["MANUAL_TARGET_MONTH"].split('-'))
+        if REPORT_CONFIG["DATE_MODE"] == "manual":
+            target_y, target_m = map(int, REPORT_CONFIG["MANUAL_TARGET_MONTH"].split('-'))
             prev_month_date = datetime.date(target_y, target_m, 1)
             current_month_date = today.replace(day=1)
         else:
@@ -170,19 +171,21 @@ class SheetsUpdater:
 
         if processed_data.empty: return
 
+        # Filtrar datos del mes histórico (Analytics)
         analytics_df = processed_data[
             (processed_data['Date'].dt.year == prev_month_date.year) & 
             (processed_data['Date'].dt.month == prev_month_date.month)
         ].copy()
-        self.upload_to_sheet(analytics_df, CONFIG["TAB_ANALYTICS"])
+        self.upload_to_sheet(analytics_df, REPORT_CONFIG["TAB_ANALYTICS"])
 
+        # Filtrar datos del mes en curso (Current Month)
         current_df = processed_data[
             (processed_data['Date'].dt.year == current_month_date.year) & 
             (processed_data['Date'].dt.month == current_month_date.month)
         ].copy()
         
         cols_current = ['Date', 'Metric', 'Value', 'Previous_FY_Value'] 
-        self.upload_to_sheet(current_df[cols_current], CONFIG["TAB_CURRENT"])
+        self.upload_to_sheet(current_df[cols_current], REPORT_CONFIG["TAB_CURRENT"])
 
 if __name__ == "__main__":
     updater = SheetsUpdater()
